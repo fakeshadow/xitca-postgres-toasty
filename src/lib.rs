@@ -16,7 +16,6 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql as sql;
-use url::Url;
 use xitca_postgres::{
     Client, Column, Config, Execute, Statement,
     iter::AsyncLendingIterator,
@@ -52,50 +51,15 @@ impl PostgreSQL {
     ///
     /// See [`postgres::Client::connect`] for more information.
     pub async fn connect(url: &str) -> Result<Self> {
-        let url = Url::parse(url)?;
-
-        if !url.scheme().starts_with("postgres") {
-            return Err(anyhow::anyhow!(
-                "connection URL does not have a `postgres` scheme; url={}",
-                url
-            ));
-        }
-
-        let host = url
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("missing host in connection URL; url={}", url))?;
-
-        if url.path().is_empty() {
-            return Err(anyhow::anyhow!(
-                "no database specified - missing path in connection URL; url={}",
-                url
-            ));
-        }
-
-        let mut config = Config::new();
-        config.host(host);
-        config.dbname(url.path().trim_start_matches('/'));
-
-        if let Some(port) = url.port() {
-            config.port(port);
-        }
-
-        if !url.username().is_empty() {
-            config.user(url.username());
-        }
-
-        if let Some(password) = url.password() {
-            config.password(password);
-        }
-
-        Self::connect_with_config(config).await
+        let cfg = Config::try_from(url)?;
+        Self::connect_with_config(cfg).await
     }
 
     /// Connects to a PostgreSQL database using a [`postgres::Config`].
     ///
     /// See [`postgres::Client::configure`] for more information.
-    pub async fn connect_with_config(config: Config) -> Result<Self> {
-        let (client, mut driver) = xitca_postgres::Postgres::new(config).connect().await?;
+    pub async fn connect_with_config(cfg: Config) -> Result<Self> {
+        let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
         tokio::spawn(async move {
             loop {
