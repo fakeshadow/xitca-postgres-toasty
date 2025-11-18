@@ -1,0 +1,20 @@
+[package]
+name = "xitca-postgres-toasty"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+xitca-postgres = { version = "0.3", features = ["compat"] }
+
+anyhow = "1"
+postgres-types = "0.2"
+toasty-core = "0.1.0"
+toasty-sql = "0.1"
+tokio = "1"
+url = "2"
+
+[patch.crates-io]
+xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "601a997" }
+
+toasty-core = { git = "http://github.com/tokio-rs/toasty" }
+toasty-sql = { git = "http://github.com/tokio-rs/toasty" }
