@@ -243,7 +243,7 @@ impl Driver for PostgreSQL {
                     .execute(&self.client)
                     .await?;
 
-                return Ok(Response::from_count(count));
+                return Ok(Response::count(count));
             }
 
             let types = params
@@ -261,7 +261,7 @@ impl Driver for PostgreSQL {
                 let condition_matched = row.get::<i64>(1);
 
                 if total == condition_matched {
-                    Ok(Response::from_count(total as _))
+                    Ok(Response::count(total as _))
                 } else {
                     anyhow::bail!("update condition did not match");
                 }
@@ -278,7 +278,7 @@ impl Driver for PostgreSQL {
                     iter.push(Ok(ValueRecord::from_vec(results)));
                 }
 
-                Ok(Response::from_value_stream(stmt::ValueStream::from_iter(
+                Ok(Response::value_stream(stmt::ValueStream::from_iter(
                     iter.into_iter(),
                 )))
             }
