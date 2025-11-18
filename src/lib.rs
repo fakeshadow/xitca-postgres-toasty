@@ -54,9 +54,9 @@ impl PostgreSQL {
     pub async fn connect(url: &str) -> Result<Self> {
         let url = Url::parse(url)?;
 
-        if url.scheme() != "postgresql" {
+        if !url.scheme().starts_with("postgres") {
             return Err(anyhow::anyhow!(
-                "connection URL does not have a `postgresql` scheme; url={}",
+                "connection URL does not have a `postgres` scheme; url={}",
                 url
             ));
         }
