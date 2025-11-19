@@ -345,3 +345,42 @@ fn postgres_ty_for_value(value: &stmt::Value) -> Type {
         _ => todo!("postgres_ty_for_value: {value:#?}"),
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect() {
+        let conn = PostgreSQL::connect("postgres://postgres:postgres@localhost:5432")
+            .await
+            .unwrap();
+
+        let db = toasty::Db::builder()
+            .register::<User>()
+            .build(conn)
+            .await
+            .unwrap();
+
+        db.reset_db().await.unwrap();
+
+        #[derive(Debug, toasty::Model)]
+        struct User {
+            #[key]
+            id: i32,
+            name: String,
+        }
+
+        User::create()
+            .id(123)
+            .name(String::from("john"))
+            .exec(&db)
+            .await
+            .unwrap();
+
+        let user = User::get_by_id(&db, 123).await.unwrap();
+
+        assert_eq!(user.id, 123);
+        assert_eq!(user.name, "john")
+    }
+}
