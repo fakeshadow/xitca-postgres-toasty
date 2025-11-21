@@ -1,13 +1,19 @@
 mod value;
-pub(crate) use value::Value;
 
-use core::{fmt, future::Future, pin::Pin};
+use core::{
+    fmt,
+    future::Future,
+    ops::Deref,
+    pin::Pin,
+    task::{Context, Poll, ready},
+};
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+use futures_core::stream::Stream;
 use toasty_core::{
     Driver, Result,
     driver::{Capability, Operation, Response},
@@ -15,12 +21,10 @@ use toasty_core::{
     stmt,
     stmt::ValueRecord,
 };
-use toasty_sql as sql;
+use toasty_sql::{self as sql, serializer::Placeholder};
 use xitca_postgres::{
-    Client, Column, Config, Execute, Statement,
-    iter::AsyncLendingIterator,
-    row::Row,
-    types::{ToSql, Type},
+    Client, Column, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator,
+    row::RowOwned, types::Type,
 };
 
 type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -191,19 +195,15 @@ impl Driver for PostgreSQL {
 
         let width = sql.returning_len();
 
-        let mut params = Vec::new();
+        let mut params = Params::default();
         let sql_as_str = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
 
-        let params = params.into_iter().map(Value::from).collect::<Vec<_>>();
-
         Box::pin(async move {
-            let args = params.iter().map(|param| param as &(dyn ToSql + Sync));
-
             if width.is_none() {
                 let count = self
                     .prepare_cached(sql_as_str, &[])
                     .await?
-                    .bind(args)
+                    .bind(params.iter())
                     .execute(&self.client)
                     .await?;
 
@@ -217,10 +217,13 @@ impl Driver for PostgreSQL {
 
             let stmt = self.prepare_cached(sql_as_str, &types).await?;
 
-            let mut stream = stmt.bind(args).query(&self.client).into_inner()?;
+            let mut stream = stmt.bind(params.iter()).query(&self.client).into_inner()?;
 
             if width.is_none() {
-                let row = stream.try_next().await?.unwrap();
+                let row = stream
+                    .try_next()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("no row data avaiable"))?;
                 let total = row.get::<i64>(0);
                 let condition_matched = row.get::<i64>(1);
 
@@ -230,20 +233,57 @@ impl Driver for PostgreSQL {
                     anyhow::bail!("update condition did not match");
                 }
             } else {
-                let ret_tys = ret_tys.as_ref().unwrap().clone();
+                let types = ret_tys.unwrap();
 
-                let mut iter = Vec::new();
+                let stream = RowStream {
+                    types,
+                    stream: RowStreamOwned::from(stream),
+                };
 
-                while let Some(row) = stream.try_next().await? {
-                    let mut results = Vec::new();
-                    for (i, column) in row.columns().iter().enumerate() {
-                        results.push(postgres_to_toasty(i, &row, column, &ret_tys[i]));
+                pin_project_lite::pin_project! {
+                    struct RowStream {
+                        types: Vec<stmt::Type>,
+                        #[pin]
+                        stream: RowStreamOwned
                     }
-                    iter.push(Ok(ValueRecord::from_vec(results)));
+                };
+
+                impl Stream for RowStream {
+                    type Item = Result<stmt::Value>;
+
+                    fn poll_next(
+                        self: Pin<&mut Self>,
+                        cx: &mut Context<'_>,
+                    ) -> Poll<Option<Self::Item>> {
+                        let this = self.project();
+
+                        match ready!(this.stream.poll_next(cx)) {
+                            Some(res) => {
+                                let row = res?;
+                                let fields = row
+                                    .columns()
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, column)| {
+                                        postgres_to_toasty(i, &row, column, &this.types[i])
+                                    })
+                                    .collect::<Vec<_>>();
+                                let val = ValueRecord::from_vec(fields).into();
+
+                                Poll::Ready(Some(Ok(val)))
+                            }
+                            None => Poll::Ready(None),
+                        }
+                    }
+
+                    #[inline]
+                    fn size_hint(&self) -> (usize, Option<usize>) {
+                        Stream::size_hint(&self.stream)
+                    }
                 }
 
-                Ok(Response::value_stream(stmt::ValueStream::from_iter(
-                    iter.into_iter(),
+                Ok(Response::value_stream(stmt::ValueStream::from_stream(
+                    stream,
                 )))
             }
         })
@@ -267,7 +307,7 @@ impl Driver for PostgreSQL {
 /// Converts a PostgreSQL value within a row to a [`toasty_core::stmt::Value`].
 fn postgres_to_toasty(
     index: usize,
-    row: &Row<'_>,
+    row: &RowOwned,
     column: &Column,
     expected_ty: &stmt::Type,
 ) -> stmt::Value {
@@ -343,6 +383,24 @@ fn postgres_ty_for_value(value: &stmt::Value) -> Type {
         stmt::Value::String(_) => Type::TEXT,
         stmt::Value::Null => Type::TEXT, // Default for NULL values
         _ => todo!("postgres_ty_for_value: {value:#?}"),
+    }
+}
+
+#[derive(Default, Debug)]
+struct Params(Vec<value::Value>);
+
+impl Deref for Params {
+    type Target = Vec<value::Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl toasty_sql::Params for Params {
+    fn push(&mut self, param: &stmt::Value) -> Placeholder {
+        self.0.push(param.clone().into());
+        Placeholder(self.0.len())
     }
 }
 
