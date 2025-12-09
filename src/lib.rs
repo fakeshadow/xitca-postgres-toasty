@@ -360,6 +360,80 @@ fn postgres_to_toasty(
                 _ => stmt::Value::I64(v), // Default fallback
             })
             .unwrap_or(stmt::Value::Null)
+    } else if column.r#type() == &Type::UUID {
+        row.get::<Option<uuid::Uuid>>(index)
+            .map(|v| match expected_ty {
+                stmt::Type::Uuid => stmt::Value::Uuid(v),
+                stmt::Type::String => stmt::Value::String(v.to_string()),
+                _ => stmt::Value::Uuid(v),
+            })
+            .unwrap_or(stmt::Value::Null)
+    } else if column.r#type() == &Type::BYTEA {
+        row.get::<Option<Vec<u8>>>(index)
+            .map(|v| match expected_ty {
+                stmt::Type::Uuid => stmt::Value::Uuid(v.try_into().expect("invalid uuid bytes")),
+                stmt::Type::Bytes => stmt::Value::Bytes(v),
+                _ => todo!(
+                    "unsupported conversion from {:#?} to {expected_ty:?}",
+                    column.r#type()
+                ),
+            })
+            .unwrap_or(stmt::Value::Null)
+    } else if column.r#type() == &Type::TIMESTAMPTZ {
+        #[cfg(feature = "jiff")]
+        {
+            row.get::<Option<jiff::Timestamp>>(index)
+                .map(stmt::Value::Timestamp)
+                .unwrap_or(stmt::Value::Null)
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIMESTAMPTZ requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::TIMESTAMP {
+        #[cfg(feature = "jiff")]
+        {
+            row.get::<Option<jiff::civil::DateTime>>(index)
+                .map(stmt::Value::DateTime)
+                .unwrap_or(stmt::Value::Null)
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIMESTAMP requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::DATE {
+        #[cfg(feature = "jiff")]
+        {
+            row.get::<Option<jiff::civil::Date>>(index)
+                .map(stmt::Value::Date)
+                .unwrap_or(stmt::Value::Null)
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("DATE requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::TIME {
+        #[cfg(feature = "jiff")]
+        {
+            row.get::<Option<jiff::civil::Time>>(index)
+                .map(stmt::Value::Time)
+                .unwrap_or(stmt::Value::Null)
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIME requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::NUMERIC {
+        #[cfg(feature = "rust_decimal")]
+        {
+            row.get::<Option<rust_decimal::Decimal>>(index)
+                .map(stmt::Value::Decimal)
+                .unwrap_or(stmt::Value::Null)
+        }
+        #[cfg(not(feature = "rust_decimal"))]
+        {
+            panic!("NUMERIC requires rust_decimal feature to be enabled")
+        }
     } else {
         todo!(
             "implement PostgreSQL to toasty conversion for `{:#?}`",
@@ -381,7 +455,18 @@ fn postgres_ty_for_value(value: &stmt::Value) -> Type {
         stmt::Value::U64(_) => Type::INT8,
         stmt::Value::Id(_) => Type::TEXT,
         stmt::Value::String(_) => Type::TEXT,
+        stmt::Value::Uuid(_) => Type::UUID,
         stmt::Value::Null => Type::TEXT, // Default for NULL values
+        #[cfg(feature = "rust_decimal")]
+        stmt::Value::Decimal(_) => Type::NUMERIC,
+        #[cfg(feature = "jiff")]
+        stmt::Value::Timestamp(_) => Type::TIMESTAMPTZ,
+        #[cfg(feature = "jiff")]
+        stmt::Value::Date(_) => Type::DATE,
+        #[cfg(feature = "jiff")]
+        stmt::Value::Time(_) => Type::TIME,
+        #[cfg(feature = "jiff")]
+        stmt::Value::DateTime(_) => Type::TIMESTAMP,
         _ => todo!("postgres_ty_for_value: {value:#?}"),
     }
 }

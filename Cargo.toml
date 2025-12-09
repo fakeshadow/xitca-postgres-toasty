@@ -3,24 +3,34 @@ name = "xitca-postgres-toasty"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+bigdecimal = ["dep:bigdecimal", "toasty-core/bigdecimal"]
+jiff = ["dep:jiff", "toasty-core/jiff", "postgres-types/with-jiff-0_2"]
+rust_decimal = ["dep:rust_decimal", "toasty-core/rust_decimal"]
+
 [dependencies]
 xitca-postgres = { version = "0.3", features = ["compat"] }
 
 anyhow = "1"
 futures-core = { version = "0.3.31", default-features = false }
 pin-project-lite = "0.2.16"
-postgres-types = "0.2"
+postgres-types = { version = "0.2", features = ["array-impls", "with-uuid-1"] }
 toasty-core = "0.1.0"
 toasty-sql = "0.1"
 tokio = { version = "1", default-features = false }
+uuid = { version = "1", default-features = false }
+
+bigdecimal = { version = "0.4.9", optional = true }
+jiff = { version = "0.2.16", optional = true }
+rust_decimal = { version = "1", features = ["db-postgres"], optional = true }
 
 [dev-dependencies]
 toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [patch.crates-io]
-xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "c9c4b25" }
+xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "4d9b9a2" }
 
-toasty = { git = "http://github.com/tokio-rs/toasty", rev = "e0c84c5" }
-toasty-core = { git = "http://github.com/tokio-rs/toasty", rev = "e0c84c5" }
-toasty-sql = { git = "http://github.com/tokio-rs/toasty", rev = "e0c84c5" }
+toasty = { git = "http://github.com/tokio-rs/toasty", rev = "d9a475c" }
+toasty-core = { git = "http://github.com/tokio-rs/toasty", rev = "d9a475c" }
+toasty-sql = { git = "http://github.com/tokio-rs/toasty", rev = "d9a475c" }

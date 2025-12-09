@@ -1,5 +1,5 @@
+use postgres_types::{IsNull, ToSql, Type, accepts, private::BytesMut, to_sql_checked};
 use toasty_core::stmt::{self, Value as CoreValue};
-use xitca_postgres::types::{IsNull, ToSql, Type, accepts, private::BytesMut, to_sql_checked};
 
 #[derive(Debug)]
 pub struct Value(pub(crate) CoreValue);
@@ -122,10 +122,45 @@ impl ToSql for Value {
             stmt::Value::Id(value) => value.to_string().to_sql(ty, out),
             stmt::Value::Null => Ok(IsNull::Yes),
             stmt::Value::String(value) => value.to_sql(ty, out),
+            stmt::Value::Bytes(value) => match *ty {
+                Type::BYTEA => value.to_sql(ty, out),
+                _ => todo!("Unsupported PostgreSQL type for bytes: {:?}", ty),
+            },
+            stmt::Value::Uuid(value) => match *ty {
+                Type::UUID => value.to_sql(ty, out),
+                Type::BYTEA => value.as_bytes().to_sql(ty, out),
+                Type::TEXT => value.to_string().to_sql(ty, out),
+                Type::VARCHAR => value.to_string().to_sql(ty, out),
+                _ => todo!("Unsupported PostgreSQL type for UUID: {:?}", ty),
+            },
+            #[cfg(feature = "rust_decimal")]
+            stmt::Value::Decimal(value) => value.to_sql(ty, out),
+            #[cfg(feature = "jiff")]
+            stmt::Value::Timestamp(value) => value.to_sql(ty, out),
+            #[cfg(feature = "jiff")]
+            stmt::Value::Date(value) => value.to_sql(ty, out),
+            #[cfg(feature = "jiff")]
+            stmt::Value::Time(value) => value.to_sql(ty, out),
+            #[cfg(feature = "jiff")]
+            stmt::Value::DateTime(value) => value.to_sql(ty, out),
             value => todo!("{value:#?}"),
         }
     }
 
-    accepts!(BOOL, INT2, INT4, INT8, TEXT, VARCHAR);
+    accepts!(
+        BOOL,
+        INT2,
+        INT4,
+        INT8,
+        TEXT,
+        VARCHAR,
+        BYTEA,
+        UUID,
+        NUMERIC,
+        TIMESTAMP,
+        TIMESTAMPTZ,
+        DATE,
+        TIME
+    );
     to_sql_checked!();
 }
