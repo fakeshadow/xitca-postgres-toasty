@@ -23,6 +23,7 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use xitca_postgres::{
     Client, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator, types::Type,
 };
@@ -33,11 +34,20 @@ type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 type CachedStatement = Arc<Statement>;
 
-#[derive(Debug)]
 pub struct PostgreSQL {
     cfg: Config,
-    conn: tokio::sync::Mutex<Option<Connection>>,
+    concurrent_level: u32,
+    permits: Arc<Semaphore>,
+    conn: Mutex<Option<Arc<_Connection>>>,
 }
+
+impl fmt::Debug for PostgreSQL {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PostgresSQL Driver")
+    }
+}
+
+const DEFAULT_CONCURRENT_LEVEL: u32 = 512;
 
 impl PostgreSQL {
     pub fn new(url: &str) -> Result<Self> {
@@ -48,13 +58,26 @@ impl PostgreSQL {
     pub fn from_config(cfg: Config) -> Self {
         Self {
             cfg,
+            concurrent_level: DEFAULT_CONCURRENT_LEVEL,
+            permits: Arc::new(Semaphore::new(DEFAULT_CONCURRENT_LEVEL as _)),
             conn: Default::default(),
         }
     }
+
+    /// adjust how many concurrent connections can be made from this driver.
+    /// 
+    /// The lowerbound concurrency is 1
+    /// The lowerbound concurrency is determined by tokio's [`Semaphore::MAX_PERMITS`]
+    pub fn concurrent_level(&mut self, size: u32) -> &mut Self {
+        assert!(size != 0 && (size as usize) < Semaphore::MAX_PERMITS, "concurrent level is beyond it's range bound");
+        self.concurrent_level = size;
+        self.permits = Arc::new(Semaphore::new(size as _));
+        self
+    }
 }
 
-#[derive(Clone)]
 pub struct Connection {
+    _permit: OwnedSemaphorePermit,
     inner: Arc<_Connection>,
 }
 
@@ -68,6 +91,8 @@ impl Deref for Connection {
 
 pub struct _Connection {
     client: Client,
+    permits: Arc<Semaphore>,
+    concurrent_level: u32,
     cache: Mutex<HashMap<String, CachedStatement>>,
 }
 
@@ -77,21 +102,20 @@ impl fmt::Debug for Connection {
     }
 }
 
-impl Connection {
+const SEMAPHORE_UNWRAP_MSG: &str = "Semaphore must not be closed when Connection is still alive";
+
+impl _Connection {
     /// Initialize a Toasty PostgreSQL driver using an initialized connection.
-    pub fn new(client: Client) -> Self {
-        Self {
-            inner: Arc::new(_Connection {
-                client,
-                cache: Mutex::new(HashMap::new()),
-            }),
-        }
+    fn new(client: Client, permits: Arc<Semaphore>, concurrent_level: u32,) -> Arc<Self> {
+        Arc::new(_Connection {
+            client,
+            permits,
+            concurrent_level,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
-    /// Connects to a PostgreSQL database using a [`Config`].
-    ///
-    /// See [`Config`] for more information.
-    pub async fn connect(cfg: Config) -> Result<Self> {
+    async fn connect(cfg: Config, permits: Arc<Semaphore>, concurrent_level: u32) -> Result<Arc<Self>> {
         let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
         tokio::spawn(async move {
@@ -104,9 +128,11 @@ impl Connection {
             }
         });
 
-        Ok(Self::new(client))
+        Ok(Self::new(client, permits, concurrent_level))
     }
+}
 
+impl Connection {
     /// Creates a table.
     pub async fn create_table(&self, schema: &Schema, table: &Table) -> Result<()> {
         let serializer = sql::Serializer::postgresql(schema);
@@ -184,13 +210,6 @@ impl Connection {
     }
 }
 
-impl From<Client> for Connection {
-    #[inline]
-    fn from(client: Client) -> Self {
-        Self::new(client)
-    }
-}
-
 impl Driver for PostgreSQL {
     fn connect<'s, 'f>(
         &'s self,
@@ -199,19 +218,45 @@ impl Driver for PostgreSQL {
         's: 'f,
     {
         Box::pin(async move {
-            let mut inner = self.conn.lock().await;
+            let _permit = self
+                .permits
+                .clone()
+                .acquire_owned()
+                .await
+                .expect(SEMAPHORE_UNWRAP_MSG);
 
-            if let Some(ref conn) = *inner
+            if let Some(ref conn) = *self.conn.lock().unwrap()
                 && !conn.client.closed()
             {
-                return Ok(Box::new(conn.clone()) as _);
+                return Ok(Box::new(Connection {
+                    _permit,
+                    inner: conn.clone(),
+                }) as _);
             }
 
-            let conn = Connection::connect(self.cfg.clone()).await?;
+            let _permit2 = self
+                .permits
+                .acquire_many(self.concurrent_level - 1)
+                .await
+                .expect(SEMAPHORE_UNWRAP_MSG);
 
-            *inner = Some(conn.clone());
+            // check a second time in case someone else has already made a new connection
+            if let Some(ref conn) = *self.conn.lock().unwrap()
+            {
+                return Ok(Box::new(Connection {
+                    _permit,
+                    inner: conn.clone(),
+                }) as _);
+            }
 
-            Ok(Box::new(conn) as _)
+            let conn = _Connection::connect(self.cfg.clone(), self.permits.clone(), self.concurrent_level).await?;
+
+            *self.conn.lock().unwrap() = Some(conn.clone());
+
+            Ok(Box::new(Connection {
+                _permit,
+                inner: conn.clone(),
+            }) as _)
         })
     }
 
@@ -234,24 +279,32 @@ impl toasty_core::driver::Connection for Connection {
         's: 'f,
         'sch: 'f,
     {
-        let (sql, ret_tys) = match op {
-            Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
-            Operation::QuerySql(query) => {
-                assert!(
-                    query.last_insert_id_hack.is_none(),
-                    "last_insert_id_hack is MySQL-specific and should not be set for PostgreSQL"
-                );
-                (query.stmt.into(), query.ret.unwrap_or_default())
-            }
-            op => todo!("op={:#?}", op),
-        };
-
-        let width = sql.returning_len();
-
-        let mut params = Params::default();
-        let sql_as_str = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
-
         Box::pin(async move {
+            let (sql, ret_tys) = match op {
+                Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
+                Operation::QuerySql(query) => {
+                    assert!(
+                        query.last_insert_id_hack.is_none(),
+                        "last_insert_id_hack is MySQL-specific and should not be set for PostgreSQL"
+                    );
+                    (query.stmt.into(), query.ret.unwrap_or_default())
+                }
+                Operation::Transaction(tx) => {
+                    let _permit = self
+                        .permits
+                        .acquire_many(self.concurrent_level - 1)
+                        .await
+                        .expect(SEMAPHORE_UNWRAP_MSG);
+                    todo!("op={:#?}", Operation::Transaction(tx))
+                }
+                op => todo!("op={:#?}", op),
+            };
+
+            let width = sql.returning_len();
+
+            let mut params = Params::default();
+            let sql_as_str = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
+
             let types = if width.is_none() {
                 Vec::new()
             } else {
