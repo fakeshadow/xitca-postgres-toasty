@@ -270,12 +270,10 @@ impl toasty_core::driver::Connection for Connection {
                 Ok(Response::count(count))
             } else {
                 let stream = stmt.into_owned().query(&self.client).await?;
-                Ok(Response::value_stream(stmt::ValueStream::from_stream(
-                    RowStream {
-                        types: ret_tys,
-                        stream,
-                    },
-                )))
+                Ok(Response::value_stream(RowStream {
+                    types: ret_tys,
+                    stream,
+                }))
             }
         })
     }
@@ -300,6 +298,12 @@ pin_project_lite::pin_project! {
         types: Vec<stmt::Type>,
         #[pin]
         stream: RowStreamOwned
+    }
+}
+
+impl From<RowStream> for stmt::ValueStream {
+    fn from(stream: RowStream) -> Self {
+        Self::from_stream(stream)
     }
 }
 
