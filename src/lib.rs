@@ -234,7 +234,13 @@ impl toasty_core::driver::Connection for Connection {
     {
         let (sql, ret_tys) = match op {
             Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
-            Operation::QuerySql(query) => (query.stmt.into(), query.ret.unwrap_or_default()),
+            Operation::QuerySql(query) => {
+                assert!(
+                    query.last_insert_id_hack.is_none(),
+                    "last_insert_id_hack is MySQL-specific and should not be set for PostgreSQL"
+                );
+                (query.stmt.into(), query.ret.unwrap_or_default())
+            }
             op => todo!("op={:#?}", op),
         };
 
@@ -244,36 +250,31 @@ impl toasty_core::driver::Connection for Connection {
         let sql_as_str = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
 
         Box::pin(async move {
+            let types = if width.is_none() {
+                Vec::new()
+            } else {
+                params
+                    .iter()
+                    .map(|param| postgres_ty_for_value(&param.0))
+                    .collect::<Vec<_>>()
+            };
+
+            let stmt = self.prepare_cached(sql_as_str, &types).await?;
+
+            let stmt = stmt.bind(params.iter());
+
             if width.is_none() {
-                let count = self
-                    .prepare_cached(sql_as_str, &[])
-                    .await?
-                    .bind(params.iter())
-                    .execute(&self.client)
-                    .await?;
-
-                return Ok(Response::count(count));
+                let count = stmt.execute(&self.client).await?;
+                Ok(Response::count(count))
+            } else {
+                let stream = stmt.into_owned().query(&self.client).await?;
+                Ok(Response::value_stream(stmt::ValueStream::from_stream(
+                    RowStream {
+                        types: ret_tys,
+                        stream,
+                    },
+                )))
             }
-
-            let types = params
-                .iter()
-                .map(|param| postgres_ty_for_value(&param.0))
-                .collect::<Vec<_>>();
-
-            let stream = self
-                .prepare_cached(sql_as_str, &types)
-                .await?
-                .bind(params.iter())
-                .into_owned()
-                .query(&self.client)
-                .await?;
-
-            Ok(Response::value_stream(stmt::ValueStream::from_stream(
-                RowStream {
-                    types: ret_tys,
-                    stream,
-                },
-            )))
         })
     }
 
