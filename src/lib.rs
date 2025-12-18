@@ -15,8 +15,8 @@ use std::{
 
 use futures_core::stream::Stream;
 use toasty_core::{
-    Driver, Result,
-    driver::{Capability, Operation, Response},
+    Result,
+    driver::{Capability, Driver, Operation, Response},
     schema::db::{Schema, Table},
     stmt,
     stmt::ValueRecord,
@@ -31,18 +31,34 @@ type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 type CachedStatement = Arc<Statement>;
 
+#[derive(Debug)]
 pub struct PostgreSQL {
+    cfg: Config,
+}
+
+impl PostgreSQL {
+    pub fn new(url: &str) -> Result<Self> {
+        let cfg = Config::try_from(url)?;
+        Ok(Self::from_config(cfg))
+    }
+
+    pub fn from_config(cfg: Config) -> Self {
+        Self { cfg }
+    }
+}
+
+pub struct Connection {
     client: Client,
     cache: Mutex<HashMap<String, CachedStatement>>,
 }
 
-impl fmt::Debug for PostgreSQL {
+impl fmt::Debug for Connection {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.write_str("PostgreSQL_Client")
+        fmt.write_str("PostgresConnection")
     }
 }
 
-impl PostgreSQL {
+impl Connection {
     /// Initialize a Toasty PostgreSQL driver using an initialized connection.
     pub fn new(client: Client) -> Self {
         Self {
@@ -51,18 +67,10 @@ impl PostgreSQL {
         }
     }
 
-    /// Connects to a PostgreSQL database using a connection string.
+    /// Connects to a PostgreSQL database using a [`Config`].
     ///
-    /// See [`postgres::Client::connect`] for more information.
-    pub async fn connect(url: &str) -> Result<Self> {
-        let cfg = Config::try_from(url)?;
-        Self::connect_with_config(cfg).await
-    }
-
-    /// Connects to a PostgreSQL database using a [`postgres::Config`].
-    ///
-    /// See [`postgres::Client::configure`] for more information.
-    pub async fn connect_with_config(cfg: Config) -> Result<Self> {
+    /// See [`Config`] for more information.
+    pub async fn connect(cfg: Config) -> Result<Self> {
         let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
         tokio::spawn(async move {
@@ -155,7 +163,7 @@ impl PostgreSQL {
     }
 }
 
-impl From<Client> for PostgreSQL {
+impl From<Client> for Connection {
     #[inline]
     fn from(client: Client) -> Self {
         Self::new(client)
@@ -163,23 +171,26 @@ impl From<Client> for PostgreSQL {
 }
 
 impl Driver for PostgreSQL {
-    fn capability(&self) -> &Capability {
+    fn connect<'s, 'f>(
+        &'s self,
+    ) -> BoxedFuture<'f, Result<Box<dyn toasty_core::driver::Connection>>>
+    where
+        's: 'f,
+    {
+        Box::pin(async move {
+            let conn = Connection::connect(self.cfg.clone()).await?;
+            Ok(Box::new(conn) as _)
+        })
+    }
+}
+
+impl toasty_core::driver::Connection for Connection {
+    fn capability(&self) -> &'static Capability {
         &Capability::POSTGRESQL
     }
 
-    fn register_schema<'s, 'sch, 'f>(
-        &'s mut self,
-        _schema: &'sch Schema,
-    ) -> BoxedFuture<'f, Result<()>>
-    where
-        's: 'f,
-        'sch: 'f,
-    {
-        Box::pin(async { Ok(()) })
-    }
-
     fn exec<'s, 'sch, 'f>(
-        &'s self,
+        &'s mut self,
         schema: &'sch Arc<Schema>,
         op: Operation,
     ) -> BoxedFuture<'f, Result<Response>>
@@ -289,7 +300,7 @@ impl Driver for PostgreSQL {
         })
     }
 
-    fn reset_db<'s, 'sch, 'f>(&'s self, schema: &'sch Schema) -> BoxedFuture<'f, Result<()>>
+    fn reset_db<'s, 'sch, 'f>(&'s mut self, schema: &'sch Schema) -> BoxedFuture<'f, Result<()>>
     where
         's: 'f,
         'sch: 'f,
@@ -495,9 +506,7 @@ mod test {
 
     #[tokio::test]
     async fn connect() {
-        let conn = PostgreSQL::connect("postgres://postgres:postgres@localhost:5432")
-            .await
-            .unwrap();
+        let conn = PostgreSQL::new("postgres://postgres:postgres@localhost:5432").unwrap();
 
         let db = toasty::Db::builder()
             .register::<User>()
