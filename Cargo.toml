@@ -31,6 +31,6 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [patch.crates-io]
 xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "249226a" }
 
-toasty = { git = "http://github.com/tokio-rs/toasty" }
-toasty-core = { git = "http://github.com/tokio-rs/toasty" }
-toasty-sql = { git = "http://github.com/tokio-rs/toasty" }
+toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
+toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
+toasty-sql = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }

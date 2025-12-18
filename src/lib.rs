@@ -22,6 +22,7 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
+use tokio::sync::Mutex as AsyncMutex;
 use xitca_postgres::{
     Client, Column, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator,
     row::RowOwned, types::Type,
@@ -34,6 +35,7 @@ type CachedStatement = Arc<Statement>;
 #[derive(Debug)]
 pub struct PostgreSQL {
     cfg: Config,
+    conn: AsyncMutex<Option<Connection>>,
 }
 
 impl PostgreSQL {
@@ -43,11 +45,27 @@ impl PostgreSQL {
     }
 
     pub fn from_config(cfg: Config) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            conn: Default::default(),
+        }
     }
 }
 
+#[derive(Clone)]
 pub struct Connection {
+    inner: Arc<_Connection>,
+}
+
+impl Deref for Connection {
+    type Target = _Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+pub struct _Connection {
     client: Client,
     cache: Mutex<HashMap<String, CachedStatement>>,
 }
@@ -62,8 +80,10 @@ impl Connection {
     /// Initialize a Toasty PostgreSQL driver using an initialized connection.
     pub fn new(client: Client) -> Self {
         Self {
-            client,
-            cache: Mutex::new(HashMap::new()),
+            inner: Arc::new(_Connection {
+                client,
+                cache: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -178,9 +198,24 @@ impl Driver for PostgreSQL {
         's: 'f,
     {
         Box::pin(async move {
+            let mut inner = self.conn.lock().await;
+
+            if let Some(ref conn) = *inner {
+                if !conn.client.closed() {
+                    return Ok(Box::new(conn.clone()) as _);
+                }
+            }
+
             let conn = Connection::connect(self.cfg.clone()).await?;
+
+            *inner = Some(conn.clone());
+
             Ok(Box::new(conn) as _)
         })
+    }
+
+    fn max_connections(&self) -> Option<usize> {
+        Some(1)
     }
 }
 
