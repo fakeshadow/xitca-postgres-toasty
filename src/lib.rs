@@ -22,7 +22,6 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use tokio::sync::Mutex as AsyncMutex;
 use xitca_postgres::{
     Client, Column, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator,
     row::RowOwned, types::Type,
@@ -35,7 +34,7 @@ type CachedStatement = Arc<Statement>;
 #[derive(Debug)]
 pub struct PostgreSQL {
     cfg: Config,
-    conn: AsyncMutex<Option<Connection>>,
+    conn: tokio::sync::Mutex<Option<Connection>>,
 }
 
 impl PostgreSQL {
@@ -233,9 +232,9 @@ impl toasty_core::driver::Connection for Connection {
         's: 'f,
         'sch: 'f,
     {
-        let (sql, ret_tys): (sql::Statement, _) = match op {
-            Operation::Insert(op) => (op.stmt.into(), None),
-            Operation::QuerySql(query) => (query.stmt.into(), query.ret),
+        let (sql, ret_tys) = match op {
+            Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
+            Operation::QuerySql(query) => (query.stmt.into(), query.ret.unwrap_or_default()),
             op => todo!("op={:#?}", op),
         };
 
@@ -261,77 +260,20 @@ impl toasty_core::driver::Connection for Connection {
                 .map(|param| postgres_ty_for_value(&param.0))
                 .collect::<Vec<_>>();
 
-            let stmt = self.prepare_cached(sql_as_str, &types).await?;
+            let stream = self
+                .prepare_cached(sql_as_str, &types)
+                .await?
+                .bind(params.iter())
+                .into_owned()
+                .query(&self.client)
+                .await?;
 
-            let mut stream = stmt.bind(params.iter()).query(&self.client).into_inner()?;
-
-            if width.is_none() {
-                let row = stream
-                    .try_next()
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("no row data avaiable"))?;
-                let total = row.get::<i64>(0);
-                let condition_matched = row.get::<i64>(1);
-
-                if total == condition_matched {
-                    Ok(Response::count(total as _))
-                } else {
-                    anyhow::bail!("update condition did not match");
-                }
-            } else {
-                let types = ret_tys.unwrap();
-
-                let stream = RowStream {
-                    types,
-                    stream: RowStreamOwned::from(stream),
-                };
-
-                pin_project_lite::pin_project! {
-                    struct RowStream {
-                        types: Vec<stmt::Type>,
-                        #[pin]
-                        stream: RowStreamOwned
-                    }
-                };
-
-                impl Stream for RowStream {
-                    type Item = Result<stmt::Value>;
-
-                    fn poll_next(
-                        self: Pin<&mut Self>,
-                        cx: &mut Context<'_>,
-                    ) -> Poll<Option<Self::Item>> {
-                        let this = self.project();
-
-                        match ready!(this.stream.poll_next(cx)) {
-                            Some(res) => {
-                                let row = res?;
-                                let fields = row
-                                    .columns()
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, column)| {
-                                        postgres_to_toasty(i, &row, column, &this.types[i])
-                                    })
-                                    .collect::<Vec<_>>();
-                                let val = ValueRecord::from_vec(fields).into();
-
-                                Poll::Ready(Some(Ok(val)))
-                            }
-                            None => Poll::Ready(None),
-                        }
-                    }
-
-                    #[inline]
-                    fn size_hint(&self) -> (usize, Option<usize>) {
-                        Stream::size_hint(&self.stream)
-                    }
-                }
-
-                Ok(Response::value_stream(stmt::ValueStream::from_stream(
+            Ok(Response::value_stream(stmt::ValueStream::from_stream(
+                RowStream {
+                    types: ret_tys,
                     stream,
-                )))
-            }
+                },
+            )))
         })
     }
 
@@ -347,6 +289,39 @@ impl toasty_core::driver::Connection for Connection {
             }
             Ok(())
         })
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct RowStream {
+        types: Vec<stmt::Type>,
+        #[pin]
+        stream: RowStreamOwned
+    }
+}
+
+impl Stream for RowStream {
+    type Item = Result<stmt::Value>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        let res = ready!(this.stream.poll_next(cx)?).map(|row| {
+            let fields = row
+                .columns()
+                .iter()
+                .enumerate()
+                .map(|(i, column)| postgres_to_toasty(i, &row, column, &this.types[i]))
+                .collect::<Vec<_>>();
+            Ok(ValueRecord::from_vec(fields).into())
+        });
+
+        Poll::Ready(res)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        Stream::size_hint(&self.stream)
     }
 }
 

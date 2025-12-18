@@ -29,7 +29,7 @@ toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [patch.crates-io]
-xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "249226a" }
+xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "ca4dda8" }
 
 toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
