@@ -1,12 +1,158 @@
+use core::ops::Deref;
+
 use postgres_types::{IsNull, ToSql, Type, accepts, private::BytesMut, to_sql_checked};
-use toasty_core::stmt::{self, Value as CoreValue};
+use toasty_core::stmt;
+use xitca_postgres::{Column, row::RowOwned};
+
+/// Converts a PostgreSQL value within a row to a Toasty value.
+pub fn from_sql(
+    index: usize,
+    row: &RowOwned,
+    column: &Column,
+    expected_ty: &stmt::Type,
+) -> stmt::Value {
+    // Gets the value from the row as Option<T> and return stmt::Value::Null if the Option is
+    // None.
+    macro_rules! get_or_return_null {
+        ($ty:ty) => {{
+            match row.get::<Option<$ty>>(index) {
+                Some(inner) => inner,
+                None => return stmt::Value::Null,
+            }
+        }};
+    }
+
+    // NOTE: unfortunately, the inner representation of the PostgreSQL type enum is not
+    // accessible, so we must manually match each type like so.
+    if column.r#type() == &Type::TEXT || column.r#type() == &Type::VARCHAR {
+        let v = get_or_return_null!(String);
+        match expected_ty {
+            stmt::Type::String => stmt::Value::String(v),
+            stmt::Type::Uuid => stmt::Value::Uuid(
+                v.parse()
+                    .unwrap_or_else(|_| panic!("uuid could not be parsed from text")),
+            ),
+            _ => stmt::Value::String(v), // Default to string
+        }
+    } else if column.r#type() == &Type::BOOL {
+        stmt::Value::Bool(get_or_return_null!(bool))
+    } else if column.r#type() == &Type::INT2 {
+        let v = get_or_return_null!(i16);
+        match expected_ty {
+            stmt::Type::I8 => stmt::Value::I8(v as i8),
+            stmt::Type::I16 => stmt::Value::I16(v),
+            stmt::Type::U8 => stmt::Value::U8(
+                u8::try_from(v).unwrap_or_else(|_| panic!("u8 value out of range: {v}")),
+            ),
+            stmt::Type::U16 => stmt::Value::U16(v as u16),
+            _ => panic!("unexpected type for INT2: {expected_ty:#?}"),
+        }
+    } else if column.r#type() == &Type::INT4 {
+        let v = get_or_return_null!(i32);
+        match expected_ty {
+            stmt::Type::I32 => stmt::Value::I32(v),
+            stmt::Type::U16 => stmt::Value::U16(
+                u16::try_from(v).unwrap_or_else(|_| panic!("u16 value out of range: {v}")),
+            ),
+            stmt::Type::U32 => stmt::Value::U32(v as u32),
+            _ => stmt::Value::I32(v), // Default fallback
+        }
+    } else if column.r#type() == &Type::INT8 {
+        let v = get_or_return_null!(i64);
+        match expected_ty {
+            stmt::Type::I64 => stmt::Value::I64(v),
+            stmt::Type::U32 => stmt::Value::U32(
+                u32::try_from(v).unwrap_or_else(|_| panic!("u32 value out of range: {v}")),
+            ),
+            stmt::Type::U64 => stmt::Value::U64(
+                u64::try_from(v).unwrap_or_else(|_| panic!("u64 value out of range: {v}")),
+            ),
+            _ => stmt::Value::I64(v), // Default fallback
+        }
+    } else if column.r#type() == &Type::UUID {
+        let v = get_or_return_null!(uuid::Uuid);
+        match expected_ty {
+            stmt::Type::Uuid => stmt::Value::Uuid(v),
+            stmt::Type::String => stmt::Value::String(v.to_string()),
+            _ => stmt::Value::Uuid(v),
+        }
+    } else if column.r#type() == &Type::BYTEA {
+        let v = get_or_return_null!(Vec<u8>);
+        match expected_ty {
+            stmt::Type::Uuid => stmt::Value::Uuid(v.try_into().expect("invalid uuid bytes")),
+            stmt::Type::Bytes => stmt::Value::Bytes(v),
+            _ => todo!(
+                "unsupported conversion from {:#?} to {expected_ty:?}",
+                column.r#type()
+            ),
+        }
+    } else if column.r#type() == &Type::TIMESTAMPTZ {
+        #[cfg(feature = "jiff")]
+        {
+            stmt::Value::Timestamp(get_or_return_null!(jiff::Timestamp))
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIMESTAMPTZ requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::TIMESTAMP {
+        #[cfg(feature = "jiff")]
+        {
+            stmt::Value::DateTime(get_or_return_null!(jiff::civil::DateTime))
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIMESTAMP requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::DATE {
+        #[cfg(feature = "jiff")]
+        {
+            stmt::Value::Date(get_or_return_null!(jiff::civil::Date))
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("DATE requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::TIME {
+        #[cfg(feature = "jiff")]
+        {
+            stmt::Value::Time(get_or_return_null!(jiff::civil::Time))
+        }
+        #[cfg(not(feature = "jiff"))]
+        {
+            panic!("TIME requires jiff feature to be enabled")
+        }
+    } else if column.r#type() == &Type::NUMERIC {
+        #[cfg(feature = "rust_decimal")]
+        {
+            stmt::Value::Decimal(get_or_return_null!(rust_decimal::Decimal))
+        }
+        #[cfg(not(feature = "rust_decimal"))]
+        {
+            panic!("NUMERIC requires rust_decimal feature to be enabled")
+        }
+    } else {
+        todo!(
+            "implement PostgreSQL to toasty conversion for `{:#?}`",
+            column.r#type()
+        );
+    }
+}
 
 #[derive(Debug)]
-pub struct Value(pub(crate) CoreValue);
+pub struct Value(stmt::Value);
 
-impl From<CoreValue> for Value {
-    fn from(value: CoreValue) -> Self {
+impl From<stmt::Value> for Value {
+    fn from(value: stmt::Value) -> Self {
         Self(value)
+    }
+}
+
+impl Deref for Value {
+    type Target = stmt::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -19,131 +165,53 @@ impl ToSql for Value {
     where
         Self: Sized,
     {
-        match &self.0 {
-            stmt::Value::Bool(value) => value.to_sql(ty, out),
-            stmt::Value::I8(value) => match *ty {
-                Type::INT2 => {
-                    let value = *value as i16;
-                    value.to_sql(ty, out)
+        match (&self.0, ty) {
+            (stmt::Value::Bool(value), _) => value.to_sql(ty, out),
+            (stmt::Value::I8(value), &Type::INT2) => (*value as i16).to_sql(ty, out),
+            (stmt::Value::I8(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+            (stmt::Value::I8(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::I16(value), &Type::INT2) => value.to_sql(ty, out),
+            (stmt::Value::I16(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+            (stmt::Value::I16(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::I32(value), &Type::INT4) => value.to_sql(ty, out),
+            (stmt::Value::I32(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::I64(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+            (stmt::Value::I64(value), &Type::INT8) => value.to_sql(ty, out),
+            (stmt::Value::U8(value), &Type::INT2) => (*value as i16).to_sql(ty, out),
+            (stmt::Value::U8(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+            (stmt::Value::U8(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::U16(value), &Type::INT4) => (*value as i32).to_sql(ty, out),
+            (stmt::Value::U16(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::U32(value), &Type::INT8) => (*value as i64).to_sql(ty, out),
+            (stmt::Value::U64(value), &Type::INT8) => {
+                if *value > i64::MAX as u64 {
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "u64 value {} exceeds i64::MAX ({}), cannot store in PostgreSQL BIGINT",
+                            value,
+                            i64::MAX
+                        ),
+                    )));
                 }
-                Type::INT4 => {
-                    let value = *value as i32;
-                    value.to_sql(ty, out)
-                }
-                Type::INT8 => {
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!(),
-            },
-            stmt::Value::I16(value) => match *ty {
-                Type::INT2 => value.to_sql(ty, out),
-                Type::INT4 => {
-                    let value = *value as i32;
-                    value.to_sql(ty, out)
-                }
-                Type::INT8 => {
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!(),
-            },
-            stmt::Value::I32(value) => match *ty {
-                Type::INT4 => value.to_sql(ty, out),
-                Type::INT8 => {
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!(),
-            },
-            // TODO: we need to do better type management
-            stmt::Value::I64(value) => match *ty {
-                Type::INT4 => {
-                    let value = *value as i32;
-                    value.to_sql(ty, out)
-                }
-                Type::INT8 => value.to_sql(ty, out),
-                _ => todo!("ty={ty:#?}"),
-            },
-            stmt::Value::U8(value) => match *ty {
-                Type::INT2 => {
-                    // u8 is now stored in i16 (SMALLINT)
-                    let value = *value as i16;
-                    value.to_sql(ty, out)
-                }
-                Type::INT4 => {
-                    let value = *value as i32;
-                    value.to_sql(ty, out)
-                }
-                Type::INT8 => {
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!(),
-            },
-            stmt::Value::U16(value) => match *ty {
-                Type::INT4 => {
-                    // u16 is now stored in i32 (INTEGER)
-                    let value = *value as i32;
-                    value.to_sql(ty, out)
-                }
-                Type::INT8 => {
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!("Unsupported PostgreSQL type for u16: {:?}", ty),
-            },
-            stmt::Value::U32(value) => match *ty {
-                Type::INT8 => {
-                    // u32 stored in BIGINT
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!("Unsupported PostgreSQL type for u32: {:?}", ty),
-            },
-            stmt::Value::U64(value) => match *ty {
-                Type::INT8 => {
-                    // PostgreSQL BIGINT is signed, so validate u64 fits in i64 range
-                    if *value > i64::MAX as u64 {
-                        return Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!(
-                                "u64 value {} exceeds i64::MAX ({}), cannot store in PostgreSQL BIGINT",
-                                value,
-                                i64::MAX
-                            ),
-                        )));
-                    }
-                    let value = *value as i64;
-                    value.to_sql(ty, out)
-                }
-                _ => todo!("Unsupported PostgreSQL type for u64: {:?}", ty),
-            },
-            stmt::Value::Id(value) => value.to_string().to_sql(ty, out),
-            stmt::Value::Null => Ok(IsNull::Yes),
-            stmt::Value::String(value) => value.to_sql(ty, out),
-            stmt::Value::Bytes(value) => match *ty {
-                Type::BYTEA => value.to_sql(ty, out),
-                _ => todo!("Unsupported PostgreSQL type for bytes: {:?}", ty),
-            },
-            stmt::Value::Uuid(value) => match *ty {
-                Type::UUID => value.to_sql(ty, out),
-                Type::BYTEA => value.as_bytes().to_sql(ty, out),
-                Type::TEXT => value.to_string().to_sql(ty, out),
-                Type::VARCHAR => value.to_string().to_sql(ty, out),
-                _ => todo!("Unsupported PostgreSQL type for UUID: {:?}", ty),
-            },
+                (*value as i64).to_sql(ty, out)
+            }
+            (stmt::Value::Id(value), _) => value.to_string().to_sql(ty, out),
+            (stmt::Value::Null, _) => Ok(IsNull::Yes),
+            (stmt::Value::String(value), _) => value.to_sql(ty, out),
+            (stmt::Value::Bytes(value), &Type::BYTEA) => value.to_sql(ty, out),
+            (stmt::Value::Uuid(value), &Type::UUID) => value.to_sql(ty, out),
             #[cfg(feature = "rust_decimal")]
-            stmt::Value::Decimal(value) => value.to_sql(ty, out),
+            (stmt::Value::Decimal(value), _) => value.to_sql(ty, out),
             #[cfg(feature = "jiff")]
-            stmt::Value::Timestamp(value) => value.to_sql(ty, out),
+            (stmt::Value::Timestamp(value), _) => value.to_sql(ty, out),
             #[cfg(feature = "jiff")]
-            stmt::Value::Date(value) => value.to_sql(ty, out),
+            (stmt::Value::Date(value), _) => value.to_sql(ty, out),
             #[cfg(feature = "jiff")]
-            stmt::Value::Time(value) => value.to_sql(ty, out),
+            (stmt::Value::Time(value), _) => value.to_sql(ty, out),
             #[cfg(feature = "jiff")]
-            stmt::Value::DateTime(value) => value.to_sql(ty, out),
-            value => todo!("{value:#?}"),
+            (stmt::Value::DateTime(value), _) => value.to_sql(ty, out),
+            (value, _) => todo!("unsupported Value for PostgreSQL type: {value:#?}, type: {ty:#?}"),
         }
     }
 

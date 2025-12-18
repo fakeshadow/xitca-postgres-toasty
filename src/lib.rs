@@ -1,3 +1,4 @@
+mod r#type;
 mod value;
 
 use core::{
@@ -23,9 +24,10 @@ use toasty_core::{
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
 use xitca_postgres::{
-    Client, Column, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator,
-    row::RowOwned, types::Type,
+    Client, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator, types::Type,
 };
+
+use crate::{r#type::TypeExt, value::Value};
 
 type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -60,7 +62,7 @@ impl Deref for Connection {
     type Target = _Connection;
 
     fn deref(&self) -> &Self::Target {
-        &*self.inner
+        &self.inner
     }
 }
 
@@ -199,10 +201,10 @@ impl Driver for PostgreSQL {
         Box::pin(async move {
             let mut inner = self.conn.lock().await;
 
-            if let Some(ref conn) = *inner {
-                if !conn.client.closed() {
-                    return Ok(Box::new(conn.clone()) as _);
-                }
+            if let Some(ref conn) = *inner
+                && !conn.client.closed()
+            {
+                return Ok(Box::new(conn.clone()) as _);
             }
 
             let conn = Connection::connect(self.cfg.clone()).await?;
@@ -255,7 +257,7 @@ impl toasty_core::driver::Connection for Connection {
             } else {
                 params
                     .iter()
-                    .map(|param| postgres_ty_for_value(&param.0))
+                    .map(|param| param.infer_ty().to_postgres_type())
                     .collect::<Vec<_>>()
             };
 
@@ -312,7 +314,7 @@ impl Stream for RowStream {
                 .columns()
                 .iter()
                 .enumerate()
-                .map(|(i, column)| postgres_to_toasty(i, &row, column, &this.types[i]))
+                .map(|(i, column)| value::from_sql(i, &row, column, &this.types[i]))
                 .collect::<Vec<_>>();
             Ok(ValueRecord::from_vec(fields).into())
         });
@@ -326,178 +328,11 @@ impl Stream for RowStream {
     }
 }
 
-/// Converts a PostgreSQL value within a row to a [`toasty_core::stmt::Value`].
-fn postgres_to_toasty(
-    index: usize,
-    row: &RowOwned,
-    column: &Column,
-    expected_ty: &stmt::Type,
-) -> stmt::Value {
-    // NOTE: unfortunately, the inner representation of the PostgreSQL type enum is not
-    // accessible, so we must manually match each type like so.
-    if column.r#type() == &Type::TEXT || column.r#type() == &Type::VARCHAR {
-        row.get::<Option<String>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::String => stmt::Value::String(v),
-                _ => stmt::Value::String(v), // Default to string
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::BOOL {
-        row.get::<Option<bool>>(index)
-            .map(stmt::Value::Bool)
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::INT2 {
-        row.get::<Option<i16>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::I8 => stmt::Value::I8(v as i8),
-                stmt::Type::I16 => stmt::Value::I16(v),
-                stmt::Type::U8 => stmt::Value::U8(
-                    u8::try_from(v).unwrap_or_else(|_| panic!("u8 value out of range: {v}")),
-                ),
-                stmt::Type::U16 => stmt::Value::U16(v as u16),
-                _ => panic!("unexpected type for INT2: {expected_ty:#?}"),
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::INT4 {
-        row.get::<Option<i32>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::I32 => stmt::Value::I32(v),
-                stmt::Type::U16 => stmt::Value::U16(
-                    u16::try_from(v).unwrap_or_else(|_| panic!("u16 value out of range: {v}")),
-                ),
-                stmt::Type::U32 => stmt::Value::U32(v as u32),
-                _ => stmt::Value::I32(v), // Default fallback
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::INT8 {
-        row.get::<Option<i64>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::I64 => stmt::Value::I64(v),
-                stmt::Type::U32 => stmt::Value::U32(
-                    u32::try_from(v).unwrap_or_else(|_| panic!("u32 value out of range: {v}")),
-                ),
-                stmt::Type::U64 => stmt::Value::U64(
-                    u64::try_from(v).unwrap_or_else(|_| panic!("u64 value out of range: {v}")),
-                ),
-                _ => stmt::Value::I64(v), // Default fallback
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::UUID {
-        row.get::<Option<uuid::Uuid>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::Uuid => stmt::Value::Uuid(v),
-                stmt::Type::String => stmt::Value::String(v.to_string()),
-                _ => stmt::Value::Uuid(v),
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::BYTEA {
-        row.get::<Option<Vec<u8>>>(index)
-            .map(|v| match expected_ty {
-                stmt::Type::Uuid => stmt::Value::Uuid(v.try_into().expect("invalid uuid bytes")),
-                stmt::Type::Bytes => stmt::Value::Bytes(v),
-                _ => todo!(
-                    "unsupported conversion from {:#?} to {expected_ty:?}",
-                    column.r#type()
-                ),
-            })
-            .unwrap_or(stmt::Value::Null)
-    } else if column.r#type() == &Type::TIMESTAMPTZ {
-        #[cfg(feature = "jiff")]
-        {
-            row.get::<Option<jiff::Timestamp>>(index)
-                .map(stmt::Value::Timestamp)
-                .unwrap_or(stmt::Value::Null)
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIMESTAMPTZ requires jiff feature to be enabled")
-        }
-    } else if column.r#type() == &Type::TIMESTAMP {
-        #[cfg(feature = "jiff")]
-        {
-            row.get::<Option<jiff::civil::DateTime>>(index)
-                .map(stmt::Value::DateTime)
-                .unwrap_or(stmt::Value::Null)
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIMESTAMP requires jiff feature to be enabled")
-        }
-    } else if column.r#type() == &Type::DATE {
-        #[cfg(feature = "jiff")]
-        {
-            row.get::<Option<jiff::civil::Date>>(index)
-                .map(stmt::Value::Date)
-                .unwrap_or(stmt::Value::Null)
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("DATE requires jiff feature to be enabled")
-        }
-    } else if column.r#type() == &Type::TIME {
-        #[cfg(feature = "jiff")]
-        {
-            row.get::<Option<jiff::civil::Time>>(index)
-                .map(stmt::Value::Time)
-                .unwrap_or(stmt::Value::Null)
-        }
-        #[cfg(not(feature = "jiff"))]
-        {
-            panic!("TIME requires jiff feature to be enabled")
-        }
-    } else if column.r#type() == &Type::NUMERIC {
-        #[cfg(feature = "rust_decimal")]
-        {
-            row.get::<Option<rust_decimal::Decimal>>(index)
-                .map(stmt::Value::Decimal)
-                .unwrap_or(stmt::Value::Null)
-        }
-        #[cfg(not(feature = "rust_decimal"))]
-        {
-            panic!("NUMERIC requires rust_decimal feature to be enabled")
-        }
-    } else {
-        todo!(
-            "implement PostgreSQL to toasty conversion for `{:#?}`",
-            column.r#type()
-        );
-    }
-}
-
-fn postgres_ty_for_value(value: &stmt::Value) -> Type {
-    match value {
-        stmt::Value::Bool(_) => Type::BOOL,
-        stmt::Value::I8(_) => Type::INT2,
-        stmt::Value::I16(_) => Type::INT2,
-        stmt::Value::I32(_) => Type::INT4,
-        stmt::Value::I64(_) => Type::INT8,
-        stmt::Value::U8(_) => Type::INT2,
-        stmt::Value::U16(_) => Type::INT4,
-        stmt::Value::U32(_) => Type::INT8,
-        stmt::Value::U64(_) => Type::INT8,
-        stmt::Value::Id(_) => Type::TEXT,
-        stmt::Value::String(_) => Type::TEXT,
-        stmt::Value::Uuid(_) => Type::UUID,
-        stmt::Value::Null => Type::TEXT, // Default for NULL values
-        #[cfg(feature = "rust_decimal")]
-        stmt::Value::Decimal(_) => Type::NUMERIC,
-        #[cfg(feature = "jiff")]
-        stmt::Value::Timestamp(_) => Type::TIMESTAMPTZ,
-        #[cfg(feature = "jiff")]
-        stmt::Value::Date(_) => Type::DATE,
-        #[cfg(feature = "jiff")]
-        stmt::Value::Time(_) => Type::TIME,
-        #[cfg(feature = "jiff")]
-        stmt::Value::DateTime(_) => Type::TIMESTAMP,
-        _ => todo!("postgres_ty_for_value: {value:#?}"),
-    }
-}
-
 #[derive(Default, Debug)]
-struct Params(Vec<value::Value>);
+struct Params(Vec<Value>);
 
 impl Deref for Params {
-    type Target = Vec<value::Value>;
+    type Target = Vec<Value>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -506,7 +341,7 @@ impl Deref for Params {
 
 impl toasty_sql::Params for Params {
     fn push(&mut self, param: &stmt::Value) -> Placeholder {
-        self.0.push(param.clone().into());
+        self.0.push(Value::from(param.clone()));
         Placeholder(self.0.len())
     }
 }
