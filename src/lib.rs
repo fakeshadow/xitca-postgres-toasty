@@ -23,23 +23,18 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore},
-    task::JoinHandle,
-};
+use tokio::{sync::Semaphore, task::JoinHandle};
 use xitca_postgres::{
-    Client, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator, types::Type,
+    Client, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator,
 };
 
 use crate::{r#type::TypeExt, value::Value};
 
 type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-type CachedStatement = Arc<Statement>;
-
 pub struct PostgreSQL {
     cfg: Config,
-    concurrent_level: usize,
+    concurrency: usize,
     conn: tokio::sync::Mutex<Option<Arc<_Connection>>>,
 }
 
@@ -60,27 +55,28 @@ impl PostgreSQL {
     pub fn from_config(cfg: Config) -> Self {
         Self {
             cfg,
-            concurrent_level: DEFAULT_CONCURRENT_LEVEL,
+            concurrency: DEFAULT_CONCURRENT_LEVEL,
             conn: Default::default(),
         }
     }
 
-    /// adjust how many concurrent connections can be made from this driver.
+    /// adjust how many concurrent connections can be made from this driver
+    ///
+    /// concurrent connections are multiple shared client backed by a single database driver
     ///
     /// The lowerbound concurrency is 1
     /// The uppperbound concurrency is determined by tokio's [`Semaphore::MAX_PERMITS`]
-    pub fn concurrent_level(&mut self, size: usize) -> &mut Self {
+    pub fn concurrency(&mut self, size: usize) -> &mut Self {
         assert!(
             size != 0 && size < Semaphore::MAX_PERMITS,
             "concurrent level is beyond it's range bound"
         );
-        self.concurrent_level = size;
+        self.concurrency = size;
         self
     }
 }
 
 pub struct Connection {
-    _permit: OwnedSemaphorePermit,
     inner: Arc<_Connection>,
 }
 
@@ -100,38 +96,39 @@ impl Deref for Connection {
 
 pub struct _Connection {
     client: Client,
-    _handle: Mutex<Option<JoinHandle<Result<()>>>>,
+    handle: Mutex<Option<JoinHandle<Result<(), xitca_postgres::Error>>>>,
     permits: Arc<Semaphore>,
-    concurrent_level: usize,
-    cache: Mutex<HashMap<String, CachedStatement>>,
+    concurrency: u32,
+    cache: tokio::sync::Mutex<HashMap<String, Statement>>,
 }
 
 const SEMAPHORE_UNWRAP_MSG: &str = "Semaphore must not be closed when Connection is still alive";
 
 impl _Connection {
-    async fn connect(cfg: Config, concurrent_level: usize) -> Result<Arc<Self>> {
+    async fn connect(cfg: Config, concurrency: usize) -> Result<Arc<Self>> {
         let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
         let handle = tokio::spawn(async move {
             while driver.try_next().await?.is_some() {}
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, xitca_postgres::Error>(())
         });
 
         Ok(Arc::new(_Connection {
             client,
-            _handle: Mutex::new(Some(handle)),
-            permits: Arc::new(Semaphore::new(concurrent_level as _)),
-            concurrent_level,
-            cache: Mutex::new(HashMap::new()),
+            handle: Mutex::new(Some(handle)),
+            permits: Arc::new(Semaphore::new(concurrency)),
+            concurrency: concurrency
+                .try_into()
+                .expect("PostgreSQL::concurrency received an illformed size"),
+            cache: Default::default(),
         }))
     }
 
-    async fn _join_error(&self) -> Result<()> {
-        let handle = self._handle.lock().unwrap().take();
+    async fn join_error(&self) -> Result<()> {
+        let handle = self.handle.lock().unwrap().take();
         if let Some(handle) = handle {
-            return handle.await?;
+            handle.await??;
         }
-
         Ok(())
     }
 }
@@ -190,25 +187,25 @@ impl Connection {
             "dropping a table shouldn't involve any parameters"
         );
 
-        sql.execute(&self.client).await?;
+        self.execute(sql.execute(&self.client)).await?;
         Ok(())
     }
 
-    async fn prepare_cached(&self, sql: String, types: &[Type]) -> Result<CachedStatement> {
-        let stmt = self.cache.lock().unwrap().get(&sql).cloned();
-        match stmt {
-            Some(stmt) => Ok(stmt),
-            None => {
-                let stmt = Statement::named(&sql, types)
-                    .execute(&self.client)
-                    .await?
-                    .leak();
-
-                let stmt = Arc::new(stmt);
-
-                self.cache.lock().unwrap().insert(sql, stmt.clone());
-
-                Ok(stmt)
+    async fn execute<F, T>(&self, exec: F) -> Result<T>
+    where
+        F: Future<Output = Result<T, xitca_postgres::Error>>,
+    {
+        match exec.await {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                let is_driver_down = e.is_driver_down();
+                let mut e = e.into();
+                // try to join the driver task when driver is gone. it would offer more
+                // detailed error message if there is any
+                if is_driver_down {
+                    e = self.join_error().await.err().unwrap_or(e);
+                }
+                Err(e)
             }
         }
     }
@@ -227,38 +224,19 @@ impl Driver for PostgreSQL {
                 match *inner {
                     Some(ref conn) if !conn.client.closed() => conn.clone(),
                     _ => {
-                        let conn =
-                            _Connection::connect(self.cfg.clone(), self.concurrent_level).await?;
+                        let conn = _Connection::connect(self.cfg.clone(), self.concurrency).await?;
                         *inner = Some(conn.clone());
-                        let _permit = conn
-                            .permits
-                            .clone()
-                            .try_acquire_owned()
-                            .expect(SEMAPHORE_UNWRAP_MSG);
-                        return Ok(Box::new(Connection {
-                            _permit,
-                            inner: conn,
-                        }) as _);
+                        conn
                     }
                 }
             };
 
-            let _permit = conn
-                .permits
-                .clone()
-                .acquire_owned()
-                .await
-                .expect(SEMAPHORE_UNWRAP_MSG);
-
-            Ok(Box::new(Connection {
-                _permit,
-                inner: conn,
-            }) as _)
+            Ok(Box::new(Connection { inner: conn }) as _)
         })
     }
 
     fn max_connections(&self) -> Option<usize> {
-        Some(self.concurrent_level as _)
+        Some(self.concurrency)
     }
 }
 
@@ -287,9 +265,11 @@ impl toasty_core::driver::Connection for Connection {
                     (query.stmt.into(), query.ret.unwrap_or_default())
                 }
                 Operation::Transaction(tx) => {
+                    // acquire all possible permits before interacting with db driver
+                    // this is for query need exclusive access to db driver e.g: transaction, copy in
                     let _permit = self
                         .permits
-                        .acquire_many(self.concurrent_level as u32 - 1)
+                        .acquire_many(self.concurrency)
                         .await
                         .expect(SEMAPHORE_UNWRAP_MSG);
                     todo!("op={:#?}", Operation::Transaction(tx))
@@ -311,19 +291,49 @@ impl toasty_core::driver::Connection for Connection {
                     .collect::<Vec<_>>()
             };
 
-            let stmt = self.prepare_cached(sql_as_str, &types).await?;
+            // acquire one permit before interacting with db driver
+            // this is for query that can be operated concurrently.
+            let permit = self.permits.acquire().await.expect(SEMAPHORE_UNWRAP_MSG);
+
+            let mut cache = self.cache.lock().await;
+
+            let stmt = match cache.get(&sql_as_str) {
+                Some(stmt) => stmt,
+                None => {
+                    let stmt = self
+                        .execute(Statement::named(&sql_as_str, &types).execute(&self.client))
+                        .await?
+                        .leak();
+
+                    cache.insert(sql_as_str.clone(), stmt);
+
+                    cache.get(&sql_as_str).unwrap()
+                }
+            };
 
             let stmt = stmt.bind(params.iter());
 
             if width.is_none() {
-                let count = stmt.execute(&self.client).await?;
-                Ok(Response::count(count))
+                let fut = stmt.execute(&self.client);
+
+                drop(cache);
+                // at this point the interaction in direction from client to driver has finished.
+                // release permit so other concurrent client can observe the state change
+                drop(permit);
+
+                self.execute(fut).await.map(Response::count)
             } else {
-                let stream = stmt.into_owned().query(&self.client).await?;
-                Ok(Response::value_stream(RowStream {
-                    types: ret_tys,
-                    stream,
-                }))
+                let fut = stmt.into_owned().query(&self.client);
+
+                drop(cache);
+                drop(permit);
+
+                self.execute(fut).await.map(|stream| {
+                    Response::value_stream(RowStream {
+                        types: ret_tys,
+                        stream,
+                    })
+                })
             }
         })
     }
