@@ -36,9 +36,8 @@ type CachedStatement = Arc<Statement>;
 
 pub struct PostgreSQL {
     cfg: Config,
-    concurrent_level: u32,
-    permits: Arc<Semaphore>,
-    conn: Mutex<Option<Arc<_Connection>>>,
+    concurrent_level: usize,
+    conn: tokio::sync::Mutex<Option<Arc<_Connection>>>,
 }
 
 impl fmt::Debug for PostgreSQL {
@@ -47,7 +46,7 @@ impl fmt::Debug for PostgreSQL {
     }
 }
 
-const DEFAULT_CONCURRENT_LEVEL: u32 = 512;
+const DEFAULT_CONCURRENT_LEVEL: usize = 512;
 
 impl PostgreSQL {
     pub fn new(url: &str) -> Result<Self> {
@@ -59,19 +58,20 @@ impl PostgreSQL {
         Self {
             cfg,
             concurrent_level: DEFAULT_CONCURRENT_LEVEL,
-            permits: Arc::new(Semaphore::new(DEFAULT_CONCURRENT_LEVEL as _)),
             conn: Default::default(),
         }
     }
 
     /// adjust how many concurrent connections can be made from this driver.
-    /// 
+    ///
     /// The lowerbound concurrency is 1
-    /// The lowerbound concurrency is determined by tokio's [`Semaphore::MAX_PERMITS`]
-    pub fn concurrent_level(&mut self, size: u32) -> &mut Self {
-        assert!(size != 0 && (size as usize) < Semaphore::MAX_PERMITS, "concurrent level is beyond it's range bound");
+    /// The uppperbound concurrency is determined by tokio's [`Semaphore::MAX_PERMITS`]
+    pub fn concurrent_level(&mut self, size: usize) -> &mut Self {
+        assert!(
+            size != 0 && size < Semaphore::MAX_PERMITS,
+            "concurrent level is beyond it's range bound"
+        );
         self.concurrent_level = size;
-        self.permits = Arc::new(Semaphore::new(size as _));
         self
     }
 }
@@ -92,7 +92,7 @@ impl Deref for Connection {
 pub struct _Connection {
     client: Client,
     permits: Arc<Semaphore>,
-    concurrent_level: u32,
+    concurrent_level: usize,
     cache: Mutex<HashMap<String, CachedStatement>>,
 }
 
@@ -106,16 +106,16 @@ const SEMAPHORE_UNWRAP_MSG: &str = "Semaphore must not be closed when Connection
 
 impl _Connection {
     /// Initialize a Toasty PostgreSQL driver using an initialized connection.
-    fn new(client: Client, permits: Arc<Semaphore>, concurrent_level: u32,) -> Arc<Self> {
+    fn new(client: Client, concurrent_level: usize) -> Arc<Self> {
         Arc::new(_Connection {
             client,
-            permits,
+            permits: Arc::new(Semaphore::new(concurrent_level as _)),
             concurrent_level,
             cache: Mutex::new(HashMap::new()),
         })
     }
 
-    async fn connect(cfg: Config, permits: Arc<Semaphore>, concurrent_level: u32) -> Result<Arc<Self>> {
+    async fn connect(cfg: Config, concurrent_level: usize) -> Result<Arc<Self>> {
         let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
         tokio::spawn(async move {
@@ -128,7 +128,7 @@ impl _Connection {
             }
         });
 
-        Ok(Self::new(client, permits, concurrent_level))
+        Ok(Self::new(client, concurrent_level))
     }
 }
 
@@ -218,50 +218,43 @@ impl Driver for PostgreSQL {
         's: 'f,
     {
         Box::pin(async move {
-            let _permit = self
+            let conn = {
+                let mut inner = self.conn.lock().await;
+                match *inner {
+                    Some(ref conn) if !conn.client.closed() => conn.clone(),
+                    _ => {
+                        let conn =
+                            _Connection::connect(self.cfg.clone(), self.concurrent_level).await?;
+                        *inner = Some(conn.clone());
+                        let _permit = conn
+                            .permits
+                            .clone()
+                            .try_acquire_owned()
+                            .expect(SEMAPHORE_UNWRAP_MSG);
+                        return Ok(Box::new(Connection {
+                            _permit,
+                            inner: conn,
+                        }) as _);
+                    }
+                }
+            };
+
+            let _permit = conn
                 .permits
                 .clone()
                 .acquire_owned()
                 .await
                 .expect(SEMAPHORE_UNWRAP_MSG);
 
-            if let Some(ref conn) = *self.conn.lock().unwrap()
-                && !conn.client.closed()
-            {
-                return Ok(Box::new(Connection {
-                    _permit,
-                    inner: conn.clone(),
-                }) as _);
-            }
-
-            let _permit2 = self
-                .permits
-                .acquire_many(self.concurrent_level - 1)
-                .await
-                .expect(SEMAPHORE_UNWRAP_MSG);
-
-            // check a second time in case someone else has already made a new connection
-            if let Some(ref conn) = *self.conn.lock().unwrap()
-            {
-                return Ok(Box::new(Connection {
-                    _permit,
-                    inner: conn.clone(),
-                }) as _);
-            }
-
-            let conn = _Connection::connect(self.cfg.clone(), self.permits.clone(), self.concurrent_level).await?;
-
-            *self.conn.lock().unwrap() = Some(conn.clone());
-
             Ok(Box::new(Connection {
                 _permit,
-                inner: conn.clone(),
+                inner: conn,
             }) as _)
         })
     }
 
     fn max_connections(&self) -> Option<usize> {
-        Some(1)
+        Some(self.concurrent_level as _)
     }
 }
 
@@ -292,7 +285,7 @@ impl toasty_core::driver::Connection for Connection {
                 Operation::Transaction(tx) => {
                     let _permit = self
                         .permits
-                        .acquire_many(self.concurrent_level - 1)
+                        .acquire_many(self.concurrent_level as u32 - 1)
                         .await
                         .expect(SEMAPHORE_UNWRAP_MSG);
                     todo!("op={:#?}", Operation::Transaction(tx))
