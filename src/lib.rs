@@ -23,7 +23,10 @@ use toasty_core::{
     stmt::ValueRecord,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 use xitca_postgres::{
     Client, Config, Execute, RowStreamOwned, Statement, iter::AsyncLendingIterator, types::Type,
 };
@@ -81,6 +84,12 @@ pub struct Connection {
     inner: Arc<_Connection>,
 }
 
+impl fmt::Debug for Connection {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.write_str("PostgresConnection")
+    }
+}
+
 impl Deref for Connection {
     type Target = _Connection;
 
@@ -91,44 +100,39 @@ impl Deref for Connection {
 
 pub struct _Connection {
     client: Client,
+    _handle: Mutex<Option<JoinHandle<Result<()>>>>,
     permits: Arc<Semaphore>,
     concurrent_level: usize,
     cache: Mutex<HashMap<String, CachedStatement>>,
 }
 
-impl fmt::Debug for Connection {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.write_str("PostgresConnection")
-    }
-}
-
 const SEMAPHORE_UNWRAP_MSG: &str = "Semaphore must not be closed when Connection is still alive";
 
 impl _Connection {
-    /// Initialize a Toasty PostgreSQL driver using an initialized connection.
-    fn new(client: Client, concurrent_level: usize) -> Arc<Self> {
-        Arc::new(_Connection {
-            client,
-            permits: Arc::new(Semaphore::new(concurrent_level as _)),
-            concurrent_level,
-            cache: Mutex::new(HashMap::new()),
-        })
-    }
-
     async fn connect(cfg: Config, concurrent_level: usize) -> Result<Arc<Self>> {
         let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
 
-        tokio::spawn(async move {
-            loop {
-                match driver.try_next().await {
-                    Ok(Some(_)) => {}
-                    Ok(None) => return,
-                    Err(e) => eprintln!("connection error: {e}"),
-                }
-            }
+        let handle = tokio::spawn(async move {
+            while driver.try_next().await?.is_some() {}
+            Ok::<_, anyhow::Error>(())
         });
 
-        Ok(Self::new(client, concurrent_level))
+        Ok(Arc::new(_Connection {
+            client,
+            _handle: Mutex::new(Some(handle)),
+            permits: Arc::new(Semaphore::new(concurrent_level as _)),
+            concurrent_level,
+            cache: Mutex::new(HashMap::new()),
+        }))
+    }
+
+    async fn _join_error(&self) -> Result<()> {
+        let handle = self._handle.lock().unwrap().take();
+        if let Some(handle) = handle {
+            return handle.await?;
+        }
+
+        Ok(())
     }
 }
 
