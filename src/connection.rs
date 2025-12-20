@@ -6,7 +6,7 @@ use std::{
 };
 
 use toasty_core::{
-    Result,
+    Result, async_trait,
     driver::{Capability, Connection as ConnectionTrait, Operation, Response},
     schema::db::{Schema, Table},
     stmt,
@@ -15,7 +15,7 @@ use toasty_sql::{self as sql, serializer::Placeholder};
 use tokio::{sync::Semaphore, task::JoinHandle};
 use xitca_postgres::{Client, Config, Execute, Statement, iter::AsyncLendingIterator};
 
-use crate::{BoxedFuture, r#type::TypeExt, value::Value};
+use crate::{r#type::TypeExt, value::Value};
 
 pub struct Connection {
     inner: Arc<_Connection>,
@@ -99,7 +99,11 @@ impl _Connection {
     }
 
     // Creates a table.
-    async fn create_table(&self, schema: &Schema, table: &Table) -> Result<()> {
+    async fn create_table(
+        &self,
+        schema: &Schema,
+        table: &Table,
+    ) -> Result<(), xitca_postgres::Error> {
         let serializer = sql::Serializer::postgresql(schema);
 
         let mut params = Vec::new();
@@ -113,7 +117,7 @@ impl _Connection {
             "creating a table shouldn't involve any parameters"
         );
 
-        self.execute(sql.execute(&self.client)).await?;
+        sql.execute(&self.client).await?;
 
         // NOTE: `params` is guaranteed to be empty based on the assertion above. If
         // that changes, `params.clear()` should be called here.
@@ -129,14 +133,19 @@ impl _Connection {
                 "creating an index shouldn't involve any parameters"
             );
 
-            self.execute(sql.execute(&self.client)).await?;
+            sql.execute(&self.client).await?;
         }
 
         Ok(())
     }
 
     // Drops a table.
-    async fn drop_table(&self, schema: &Schema, table: &Table, if_exists: bool) -> Result<()> {
+    async fn drop_table(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        if_exists: bool,
+    ) -> Result<(), xitca_postgres::Error> {
         let serializer = sql::Serializer::postgresql(schema);
         let mut params = Vec::new();
 
@@ -151,11 +160,15 @@ impl _Connection {
             "dropping a table shouldn't involve any parameters"
         );
 
-        self.execute(sql.execute(&self.client)).await?;
+        sql.execute(&self.client).await?;
         Ok(())
     }
 
-    async fn exec(&self, schema: &Arc<Schema>, op: Operation) -> Result<Response> {
+    async fn exec(
+        &self,
+        schema: &Arc<Schema>,
+        op: Operation,
+    ) -> Result<Response, xitca_postgres::Error> {
         let (sql, ret_tys) = match op {
             Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
             Operation::QuerySql(query) => {
@@ -201,8 +214,8 @@ impl _Connection {
         let stmt = match cache.get(&sql_as_str) {
             Some(stmt) => stmt,
             None => {
-                let stmt = self
-                    .execute(Statement::named(&sql_as_str, &types).execute(&self.client))
+                let stmt = Statement::named(&sql_as_str, &types)
+                    .execute(&self.client)
                     .await?
                     .leak();
                 cache.entry(sql_as_str).or_insert(stmt)
@@ -219,20 +232,19 @@ impl _Connection {
             // release permit so other concurrent client can observe the state change
             drop(permit);
 
-            self.execute(fut).await.map(Response::count)
+            fut.await.map(Response::count)
         } else {
             let fut = stmt.into_owned().query(&self.client);
 
             drop(cache);
             drop(permit);
 
-            self.execute(fut).await.map(|stream| {
-                Response::value_stream(crate::async_iter::RowStream::new(ret_tys, stream))
-            })
+            fut.await
+                .map(|stream| Response::value_stream(crate::async_iter::stream(stream, ret_tys)))
         }
     }
 
-    async fn reset_db(&self, schema: &Schema) -> Result<()> {
+    async fn reset_db(&self, schema: &Schema) -> Result<(), xitca_postgres::Error> {
         for table in &schema.tables {
             self.drop_table(schema, table, true).await?;
             self.create_table(schema, table).await?;
@@ -241,30 +253,19 @@ impl _Connection {
     }
 }
 
+#[async_trait]
 impl ConnectionTrait for Connection {
     fn capability(&self) -> &'static Capability {
         &Capability::POSTGRESQL
     }
 
     #[inline]
-    fn exec<'s, 'sch, 'f>(
-        &'s mut self,
-        schema: &'sch Arc<Schema>,
-        op: Operation,
-    ) -> BoxedFuture<'f, Result<Response>>
-    where
-        's: 'f,
-        'sch: 'f,
-    {
-        Box::pin(self.inner.exec(schema, op))
+    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response> {
+        self.inner.execute(self.inner.exec(schema, op)).await
     }
 
-    fn reset_db<'s, 'sch, 'f>(&'s mut self, schema: &'sch Schema) -> BoxedFuture<'f, Result<()>>
-    where
-        's: 'f,
-        'sch: 'f,
-    {
-        Box::pin(self.inner.reset_db(schema))
+    async fn reset_db(&mut self, schema: &Schema) -> Result<()> {
+        self.inner.execute(self.inner.reset_db(schema)).await
     }
 }
 

@@ -1,9 +1,9 @@
 use core::fmt;
 
-use toasty_core::{Result, driver::Driver};
+use toasty_core::{Result, async_trait, driver::Driver};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::{BoxedFuture, connection::Connection};
+use crate::connection::Connection;
 
 pub use xitca_postgres::Config;
 
@@ -59,28 +59,22 @@ impl PostgreSQL {
     }
 }
 
+#[async_trait]
 impl Driver for PostgreSQL {
-    fn connect<'s, 'f>(
-        &'s self,
-    ) -> BoxedFuture<'f, Result<Box<dyn toasty_core::driver::Connection>>>
-    where
-        's: 'f,
-    {
-        Box::pin(async move {
-            let mut inner = self.conn.lock().await;
+    async fn connect(&self) -> Result<Box<dyn toasty_core::driver::Connection>> {
+        let mut inner = self.conn.lock().await;
 
-            if let Some(ref conn) = *inner
-                && let Some(conn) = conn.try_clone()
-            {
-                return Ok(Box::new(conn) as _);
-            }
+        if let Some(ref conn) = *inner
+            && let Some(conn) = conn.try_clone()
+        {
+            return Ok(Box::new(conn) as _);
+        }
 
-            inner.take();
-            let conn = Connection::connect(self.cfg.clone(), self.concurrency).await?;
-            *inner = conn.try_clone();
+        inner.take();
+        let conn = Connection::connect(self.cfg.clone(), self.concurrency).await?;
+        *inner = conn.try_clone();
 
-            Ok(Box::new(conn) as _)
-        })
+        Ok(Box::new(conn) as _)
     }
 
     fn max_connections(&self) -> Option<usize> {

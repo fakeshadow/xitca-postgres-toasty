@@ -12,6 +12,7 @@ rust_decimal = ["dep:rust_decimal", "toasty-core/rust_decimal"]
 xitca-postgres = { version = "0.3", features = ["compat"] }
 
 anyhow = "1"
+async-stream = "0.3.6"
 futures-core = { version = "0.3.31", default-features = false }
 pin-project-lite = "0.2.16"
 postgres-types = { version = "0.2", features = ["array-impls", "with-uuid-1"] }
@@ -29,7 +30,7 @@ toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [patch.crates-io]
-xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "9e3f3bb" }
+xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "6544494" }
 
 toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }

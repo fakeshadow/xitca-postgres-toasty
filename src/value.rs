@@ -2,12 +2,12 @@ use core::ops::Deref;
 
 use postgres_types::{IsNull, ToSql, Type, accepts, private::BytesMut, to_sql_checked};
 use toasty_core::stmt;
-use xitca_postgres::{Column, row::RowOwned};
+use xitca_postgres::{Column, row::Row};
 
 /// Converts a PostgreSQL value within a row to a Toasty value.
 pub fn from_sql(
     index: usize,
-    row: &RowOwned,
+    row: &Row<'_>,
     column: &Column,
     expected_ty: &stmt::Type,
 ) -> stmt::Value {
