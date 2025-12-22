@@ -7,9 +7,10 @@ edition = "2024"
 bigdecimal = ["dep:bigdecimal", "toasty-core/bigdecimal"]
 jiff = ["dep:jiff", "toasty-core/jiff", "postgres-types/with-jiff-0_2"]
 rust_decimal = ["dep:rust_decimal", "toasty-core/rust_decimal"]
+tls = ["xitca-postgres/tls"]
 
 [dependencies]
-xitca-postgres = { version = "0.3", features = ["compat"] }
+xitca-postgres = { version = "0.3" }
 
 anyhow = "1"
 async-stream = "0.3.6"
@@ -30,7 +31,7 @@ toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [patch.crates-io]
-xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "6544494" }
+xitca-postgres = { git = "http://github.com/HFQR/xitca-web", rev = "3f38156" }
 
 toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }

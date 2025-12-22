@@ -1,9 +1,6 @@
 use core::{fmt, ops::Deref};
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use toasty_core::{
     Result, async_trait,
@@ -12,13 +9,12 @@ use toasty_core::{
     stmt,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use tokio::{sync::Semaphore, task::JoinHandle};
-use xitca_postgres::{Client, Config, Execute, Statement, iter::AsyncLendingIterator};
+use xitca_postgres::{Execute, Statement, pool::Pool};
 
 use crate::{r#type::TypeExt, value::Value};
 
 pub struct Connection {
-    inner: Arc<_Connection>,
+    pool: Arc<Pool>,
 }
 
 impl fmt::Debug for Connection {
@@ -27,80 +23,16 @@ impl fmt::Debug for Connection {
     }
 }
 
-struct _Connection {
-    client: Client,
-    handle: Mutex<Option<JoinHandle<Result<(), xitca_postgres::Error>>>>,
-    permits: Arc<Semaphore>,
-    concurrency: u32,
-    cache: tokio::sync::Mutex<HashMap<String, Statement>>,
+impl Connection {
+    pub(crate) fn from_pool(pool: Arc<Pool>) -> Self {
+        Self { pool }
+    }
 }
-
-const SEMAPHORE_UNWRAP_MSG: &str = "Semaphore must not be closed when Connection is still alive";
 
 impl Connection {
-    pub(crate) async fn connect(cfg: Config, concurrency: usize) -> Result<Self> {
-        let (client, mut driver) = xitca_postgres::Postgres::new(cfg).connect().await?;
-
-        let handle = tokio::spawn(async move {
-            while driver.try_next().await?.is_some() {}
-            Ok::<_, xitca_postgres::Error>(())
-        });
-
-        Ok(Connection {
-            inner: Arc::new(_Connection {
-                client,
-                handle: Mutex::new(Some(handle)),
-                permits: Arc::new(Semaphore::new(concurrency)),
-                concurrency: concurrency
-                    .try_into()
-                    .expect("PostgreSQL::concurrency received an illformed size"),
-                cache: Default::default(),
-            }),
-        })
-    }
-
-    pub(crate) fn try_clone(&self) -> Option<Self> {
-        if self.inner.client.closed() {
-            None
-        } else {
-            Some(Connection {
-                inner: self.inner.clone(),
-            })
-        }
-    }
-}
-
-impl _Connection {
-    async fn execute<F, T>(&self, exec: F) -> Result<T>
-    where
-        F: Future<Output = Result<T, xitca_postgres::Error>>,
-    {
-        match exec.await {
-            Ok(res) => Ok(res),
-            Err(e) => {
-                let is_driver_down = e.is_driver_down();
-                let mut e = e.into();
-                // try to join the driver task when driver is gone. it would offer more
-                // detailed error message if there is any
-                if is_driver_down && let Err(err) = self.join_error().await {
-                    e = err;
-                }
-                Err(e)
-            }
-        }
-    }
-
-    async fn join_error(&self) -> Result<()> {
-        let handle = self.handle.lock().unwrap().take();
-        if let Some(handle) = handle {
-            handle.await??;
-        }
-        Ok(())
-    }
-
     // Creates a table.
     async fn create_table(
-        &self,
+        &mut self,
         schema: &Schema,
         table: &Table,
     ) -> Result<(), xitca_postgres::Error> {
@@ -117,7 +49,9 @@ impl _Connection {
             "creating a table shouldn't involve any parameters"
         );
 
-        sql.execute(&self.client).await?;
+        let conn = self.pool.get().await?;
+
+        sql.execute(&conn).await?;
 
         // NOTE: `params` is guaranteed to be empty based on the assertion above. If
         // that changes, `params.clear()` should be called here.
@@ -133,7 +67,7 @@ impl _Connection {
                 "creating an index shouldn't involve any parameters"
             );
 
-            sql.execute(&self.client).await?;
+            sql.execute(&conn).await?;
         }
 
         Ok(())
@@ -141,7 +75,7 @@ impl _Connection {
 
     // Drops a table.
     async fn drop_table(
-        &self,
+        &mut self,
         schema: &Schema,
         table: &Table,
         if_exists: bool,
@@ -160,15 +94,20 @@ impl _Connection {
             "dropping a table shouldn't involve any parameters"
         );
 
-        sql.execute(&self.client).await?;
+        let conn = self.pool.get().await?;
+
+        sql.execute(&conn).await?;
         Ok(())
     }
+}
 
-    async fn exec(
-        &self,
-        schema: &Arc<Schema>,
-        op: Operation,
-    ) -> Result<Response, xitca_postgres::Error> {
+#[async_trait]
+impl ConnectionTrait for Connection {
+    fn capability(&self) -> &'static Capability {
+        &Capability::POSTGRESQL
+    }
+
+    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response> {
         let (sql, ret_tys) = match op {
             Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
             Operation::QuerySql(query) => {
@@ -179,13 +118,6 @@ impl _Connection {
                 (query.stmt.into(), query.ret.unwrap_or_default())
             }
             Operation::Transaction(tx) => {
-                // acquire all possible permits before interacting with db driver
-                // this is for query need exclusive access to db driver e.g: transaction, copy in
-                let _permit = self
-                    .permits
-                    .acquire_many(self.concurrency)
-                    .await
-                    .expect(SEMAPHORE_UNWRAP_MSG);
                 todo!("op={:#?}", Operation::Transaction(tx))
             }
             op => todo!("op={:#?}", op),
@@ -205,67 +137,39 @@ impl _Connection {
                 .collect()
         };
 
-        // acquire one permit before interacting with db driver
-        // this is for query that can be operated concurrently.
-        let permit = self.permits.acquire().await.expect(SEMAPHORE_UNWRAP_MSG);
+        let mut conn = self.pool.get().await?;
 
-        let mut cache = self.cache.lock().await;
-
-        let stmt = match cache.get(&sql_as_str) {
-            Some(stmt) => stmt,
-            None => {
-                let stmt = Statement::named(&sql_as_str, &types)
-                    .execute(&self.client)
-                    .await?
-                    .leak();
-                cache.entry(sql_as_str).or_insert(stmt)
-            }
-        };
+        let stmt = Statement::named(&sql_as_str, &types)
+            .execute(&mut conn)
+            .await?;
 
         let stmt = stmt.bind(params.iter());
 
         if width.is_none() {
-            let fut = stmt.execute(&self.client);
+            let fut = stmt.execute(&conn);
 
-            drop(cache);
-            // at this point the interaction in direction from client to driver has finished.
-            // release permit so other concurrent client can observe the state change
-            drop(permit);
+            drop(conn);
 
-            fut.await.map(Response::count)
+            let res = fut.await?;
+            Ok(Response::count(res))
         } else {
-            let fut = stmt.into_owned().query(&self.client);
+            let fut = stmt.into_owned().query(&conn);
 
-            drop(cache);
-            drop(permit);
+            drop(conn);
 
-            fut.await
-                .map(|stream| Response::value_stream(crate::async_iter::stream(stream, ret_tys)))
+            let stream = fut.await?;
+            Ok(Response::value_stream(crate::async_iter::stream(
+                stream, ret_tys,
+            )))
         }
     }
 
-    async fn reset_db(&self, schema: &Schema) -> Result<(), xitca_postgres::Error> {
+    async fn reset_db(&mut self, schema: &Schema) -> Result<()> {
         for table in &schema.tables {
             self.drop_table(schema, table, true).await?;
             self.create_table(schema, table).await?;
         }
         Ok(())
-    }
-}
-
-#[async_trait]
-impl ConnectionTrait for Connection {
-    fn capability(&self) -> &'static Capability {
-        &Capability::POSTGRESQL
-    }
-
-    #[inline]
-    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response> {
-        self.inner.execute(self.inner.exec(schema, op)).await
-    }
-
-    async fn reset_db(&mut self, schema: &Schema) -> Result<()> {
-        self.inner.execute(self.inner.reset_db(schema)).await
     }
 }
 

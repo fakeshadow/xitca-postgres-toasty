@@ -1,16 +1,19 @@
 use core::fmt;
 
-use toasty_core::{Result, async_trait, driver::Driver};
-use tokio::sync::{Mutex, Semaphore};
+use std::sync::Arc;
+
+use toasty_core::{Error, Result, async_trait, driver::Driver};
 
 use crate::connection::Connection;
 
-pub use xitca_postgres::Config;
+pub use xitca_postgres::{Config, pool::Pool};
 
+/// async postgresql driver for toasty ORM
+///
+/// # Pro
+/// - Multiplexing and Pipelining enabled for better concurrency and low latency over lossy network
 pub struct PostgreSQL {
-    cfg: Config,
-    concurrency: usize,
-    conn: Mutex<Option<Connection>>,
+    pool: Arc<Pool>,
 }
 
 impl fmt::Debug for PostgreSQL {
@@ -19,7 +22,7 @@ impl fmt::Debug for PostgreSQL {
     }
 }
 
-const DEFAULT_CONCURRENT_LEVEL: usize = 512;
+const DEFAULT_CONCURRENT_LEVEL: usize = 4;
 
 impl PostgreSQL {
     /// create a new driver with given url string.
@@ -30,54 +33,70 @@ impl PostgreSQL {
     ///     .expect("panic if url is illformated");
     /// ```
     pub fn new(url: &str) -> Result<Self> {
-        let cfg = Config::try_from(url)?;
-        Ok(Self::from_config(cfg))
+        Self::builder(url).build()
     }
 
     /// create a new driver with given [`Config`]
-    pub fn from_config(cfg: Config) -> Self {
+    pub fn from_config(cfg: Config) -> Result<Self> {
+        Self::builder(cfg).build()
+    }
+
+    /// create a builder type where more options can be configed before making the final driver
+    pub fn builder<C>(cfg: C) -> PostgreSQLBuilder
+    where
+        Config: TryFrom<C>,
+        Error: From<<Config as TryFrom<C>>::Error>,
+    {
+        PostgreSQLBuilder::new(cfg.try_into().map_err(Into::into))
+    }
+}
+
+pub struct PostgreSQLBuilder {
+    cfg: Result<Config>,
+    concurrency: usize,
+}
+
+impl PostgreSQLBuilder {
+    fn new(cfg: Result<Config>) -> Self {
         Self {
             cfg,
             concurrency: DEFAULT_CONCURRENT_LEVEL,
-            conn: Default::default(),
         }
     }
 
-    /// adjust how many concurrent connections can be made from this driver
+    /// Adjust how many concurrent connections can be made
+    /// 
+    /// It should be noted this setting is driver specific and has nothing to do with toasty's integrated connection pool.
+    /// In other words this driver offers a second layer of pooling to bypass toasty's connection pool limitation. 
+    /// 
+    /// The goal is to achieve better concurrency, lantency and connection resource management
     ///
-    /// concurrent connections are multiple shared client backed by a single database driver
-    ///
-    /// The lowerbound concurrency is 1
-    /// The uppperbound concurrency is determined by tokio's [`Semaphore::MAX_PERMITS`]
+    /// # Defaults
+    /// 
+    /// Default value is 4
     pub fn concurrency(mut self, size: usize) -> Self {
-        assert!(
-            size != 0 && size < Semaphore::MAX_PERMITS,
-            "concurrent level is beyond it's range bound"
-        );
+        assert!(size != 0, "concurrent level must not be zero");
         self.concurrency = size;
         self
+    }
+
+    /// finalize the building process and make the driver
+    pub fn build(self) -> Result<PostgreSQL> {
+        let cfg = self.cfg?;
+        Ok(PostgreSQL {
+            pool: Arc::new(
+                Pool::builder(cfg)
+                    .capacity(self.concurrency)
+                    .build()
+                    .expect("Config is already parsed"),
+            ),
+        })
     }
 }
 
 #[async_trait]
 impl Driver for PostgreSQL {
     async fn connect(&self) -> Result<Box<dyn toasty_core::driver::Connection>> {
-        let mut inner = self.conn.lock().await;
-
-        if let Some(ref conn) = *inner
-            && let Some(conn) = conn.try_clone()
-        {
-            return Ok(Box::new(conn) as _);
-        }
-
-        inner.take();
-        let conn = Connection::connect(self.cfg.clone(), self.concurrency).await?;
-        *inner = conn.try_clone();
-
-        Ok(Box::new(conn) as _)
-    }
-
-    fn max_connections(&self) -> Option<usize> {
-        Some(self.concurrency)
+        Ok(Box::new(Connection::from_pool(self.pool.clone())))
     }
 }
