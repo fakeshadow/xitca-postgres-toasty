@@ -6,4 +6,4 @@ mod driver;
 mod r#type;
 mod value;
 
-pub use crate::driver::{Config, PostgreSQL};
+pub use crate::driver::{Config, PostgreSQL, PostgreSQLBuilder};

@@ -53,8 +53,6 @@ impl fmt::Debug for PostgreSQL {
     }
 }
 
-const DEFAULT_CONCURRENT_LEVEL: usize = 4;
-
 impl PostgreSQL {
     /// create a new driver with given url string.
     ///
@@ -82,29 +80,34 @@ impl PostgreSQL {
     }
 }
 
+/// Builder type for [`PostgreSQL`] driver. offer additional configuration before finalizing.
 pub struct PostgreSQLBuilder {
     cfg: Result<Config>,
     concurrency: usize,
 }
 
 impl PostgreSQLBuilder {
+    pub const DEFAULT_CONCURRENT_LEVEL: usize = 4;
+
     fn new(cfg: Result<Config>) -> Self {
         Self {
             cfg,
-            concurrency: DEFAULT_CONCURRENT_LEVEL,
+            concurrency: Self::DEFAULT_CONCURRENT_LEVEL,
         }
     }
 
-    /// Adjust how many concurrent connections can be made
+    /// Adjust how many concurrent network connections to database can be made.
+    ///
+    /// Driver is able to multiplex any amount of toasty connections regardless this concurency setting.
+    ///
+    /// Increase concurrency MAY improve performance. e.g: transaction and/or copy in/out.
+    /// Increase concurrency WILL increase system resource usage. Mostly in the form of more network connections.
     ///
     /// It should be noted this setting is driver specific and has nothing to do with toasty's integrated connection pool.
-    /// In other words this driver offers a second layer of pooling to bypass toasty's connection pool limitation.
-    ///
-    /// The goal is to achieve better concurrency, lantency and connection resource management
     ///
     /// # Defaults
     ///
-    /// Default value is 4
+    /// Default value is [`Self::DEFAULT_CONCURRENT_LEVEL`]
     pub fn concurrency(mut self, size: usize) -> Self {
         assert!(size != 0, "concurrent level must not be zero");
         self.concurrency = size;
