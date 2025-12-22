@@ -10,8 +10,39 @@ pub use xitca_postgres::{Config, pool::Pool};
 
 /// async postgresql driver for toasty ORM
 ///
-/// # Pro
+/// # Pros
 /// - Multiplexing and Pipelining enabled for better concurrency and low latency over lossy network
+///
+/// # Examples
+/// ```rust
+/// // This is a desugared example for showcasing features of driver.
+/// // In real world usage all the details are handled by toasty ORM automatically
+/// # use std::sync::Arc;
+/// #
+/// # use toasty_core::{driver::Operation, schema::db::Schema};
+/// use toasty::driver::{Connection, Driver};
+///
+/// # async fn multiplexing(schema: &Arc<Schema>, op1: Operation, op2: Operation) -> anyhow::Result<()> {
+/// // construct a driver and obtain a connection manually.
+/// let driver = xitca_postgres_toasty::PostgreSQL::new("postgres://postgres:postgres@localhost:5432")?;
+/// let mut conn = driver.connect().await?;
+///
+/// // driver can multiplexing user facing connections arbitrarily.
+/// // The real network connections are managed by driver separately and the query traffic is scheduled in M:N manner
+/// for _ in 0..10000 {
+///     conn = driver.connect().await?;
+/// }
+///
+/// // user facing connection can pipeline queries together when possible and reduce latency
+/// // future join can execute these queries concurrently if possible.
+/// let (_, _) = futures::future::try_join(
+///     driver.connect().await?.exec(schema, op1),
+///     driver.connect().await?.exec(schema, op2)
+/// ).await?;
+///
+/// # Ok(())
+/// # }
+/// ```
 pub struct PostgreSQL {
     pool: Arc<Pool>,
 }
@@ -65,14 +96,14 @@ impl PostgreSQLBuilder {
     }
 
     /// Adjust how many concurrent connections can be made
-    /// 
+    ///
     /// It should be noted this setting is driver specific and has nothing to do with toasty's integrated connection pool.
-    /// In other words this driver offers a second layer of pooling to bypass toasty's connection pool limitation. 
-    /// 
+    /// In other words this driver offers a second layer of pooling to bypass toasty's connection pool limitation.
+    ///
     /// The goal is to achieve better concurrency, lantency and connection resource management
     ///
     /// # Defaults
-    /// 
+    ///
     /// Default value is 4
     pub fn concurrency(mut self, size: usize) -> Self {
         assert!(size != 0, "concurrent level must not be zero");

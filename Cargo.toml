@@ -27,6 +27,7 @@ jiff = { version = "0.2.16", optional = true }
 rust_decimal = { version = "1", features = ["db-postgres"], optional = true }
 
 [dev-dependencies]
+futures = { version = "0.3", default-features = false }
 toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
