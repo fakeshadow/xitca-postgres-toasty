@@ -1,4 +1,4 @@
-use core::{fmt, ops::Deref};
+use core::fmt;
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use toasty_core::{
     stmt,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use xitca_postgres::{Execute, Statement, pool::Pool};
+use xitca_postgres::{Execute, Statement, pool::Pool, types::Type};
 
 use crate::{r#type::TypeExt, value::Value};
 
@@ -126,24 +126,15 @@ impl ConnectionTrait for Connection {
         let width = sql.returning_len();
 
         let mut params = Params::default();
-        let sql_as_str = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
+        let stmt = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
 
-        let types = if width.is_none() {
-            Vec::new()
-        } else {
-            params
-                .iter()
-                .map(|param| param.infer_ty().to_postgres_type())
-                .collect()
-        };
+        let Params { ty, val } = params;
 
         let mut conn = self.pool.get().await?;
 
-        let stmt = Statement::named(&sql_as_str, &types)
-            .execute(&mut conn)
-            .await?;
+        let stmt = Statement::named(&stmt, &ty).execute(&mut conn).await?;
 
-        let stmt = stmt.bind(params.iter());
+        let stmt = stmt.bind(val.iter());
 
         if width.is_none() {
             let fut = stmt.execute(&conn);
@@ -174,19 +165,15 @@ impl ConnectionTrait for Connection {
 }
 
 #[derive(Default, Debug)]
-struct Params(Vec<Value>);
-
-impl Deref for Params {
-    type Target = Vec<Value>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+struct Params {
+    ty: Vec<Type>,
+    val: Vec<Value>,
 }
 
 impl toasty_sql::Params for Params {
     fn push(&mut self, param: &stmt::Value) -> Placeholder {
-        self.0.push(Value::from(param.clone()));
-        Placeholder(self.0.len())
+        self.ty.push(param.infer_ty().to_postgres_type());
+        self.val.push(Value::from(param.clone()));
+        Placeholder(self.val.len())
     }
 }
