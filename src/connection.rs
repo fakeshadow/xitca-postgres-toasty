@@ -40,7 +40,7 @@ impl Connection {
 
         let mut params = Vec::new();
         let sql = serializer.serialize(
-            &sql::Statement::create_table(table, &Capability::POSTGRESQL),
+            &sql::Statement::create_table(table, self.capability()),
             &mut params,
         );
 
@@ -130,25 +130,13 @@ impl ConnectionTrait for Connection {
 
         let Params { ty, val } = params;
 
-        let mut conn = self.pool.get().await?;
-
-        let stmt = Statement::named(&stmt, &ty).execute(&mut conn).await?;
-
-        let stmt = stmt.bind(val.iter());
+        let stmt = Statement::named(&stmt, &ty).bind(val.iter());
 
         if width.is_none() {
-            let fut = stmt.execute(&conn);
-
-            drop(conn);
-
-            let res = fut.await?;
+            let res = stmt.execute(&*self.pool).await?;
             Ok(Response::count(res))
         } else {
-            let fut = stmt.into_owned().query(&conn);
-
-            drop(conn);
-
-            let stream = fut.await?;
+            let stream = stmt.query(&*self.pool).await?;
             Ok(Response::value_stream(crate::async_iter::stream(
                 stream, ret_tys,
             )))

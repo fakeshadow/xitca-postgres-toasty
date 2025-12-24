@@ -10,6 +10,8 @@ jiff = ["dep:jiff", "toasty-core/jiff", "postgres-types/with-jiff-0_2"]
 rust_decimal = ["dep:rust_decimal", "toasty-core/rust_decimal"]
 tls = ["xitca-postgres/tls"]
 
+nightly = ["xitca-postgres/nightly"]
+
 [dependencies]
 xitca-postgres = { version = "0.3" }
 
