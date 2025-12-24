@@ -31,8 +31,10 @@ rust_decimal = { version = "1", features = ["db-postgres"], optional = true }
 futures = { version = "0.3", default-features = false }
 toasty = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
+toasty-driver-integration-suite = "0.1"
 
 [patch.crates-io]
 toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-sql = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
+toasty-driver-integration-suite = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }

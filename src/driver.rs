@@ -78,6 +78,13 @@ impl PostgreSQL {
     {
         PostgreSQLBuilder::new(cfg.try_into().map_err(Into::into))
     }
+
+    #[doc(hidden)]
+    /// Expose `xitca-postgres` crate internal for testing purpose. this API does not offer any stability and can
+    /// be changed without proper versioning
+    pub fn pool(&self) -> &Pool {
+        &self.pool
+    }
 }
 
 /// Builder type for [`PostgreSQL`] driver. offer additional configuration before finalizing.
