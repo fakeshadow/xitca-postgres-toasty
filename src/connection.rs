@@ -117,9 +117,6 @@ impl ConnectionTrait for Connection {
                 );
                 (query.stmt.into(), query.ret.unwrap_or_default())
             }
-            Operation::Transaction(tx) => {
-                todo!("op={:#?}", Operation::Transaction(tx))
-            }
             op => todo!("op={:#?}", op),
         };
 
@@ -127,7 +124,6 @@ impl ConnectionTrait for Connection {
 
         let mut params = Params::default();
         let stmt = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
-
         let Params { ty, val } = params;
 
         let stmt = Statement::named(&stmt, &ty).bind(val.iter());
