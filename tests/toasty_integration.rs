@@ -27,4 +27,4 @@ impl Setup for DriverSetup {
     }
 }
 
-toasty_driver_integration_suite::generate_driver_tests!(DriverSetup);
+toasty_driver_integration_suite::generate_driver_tests!(DriverSetup, bigdecimal_implemented: false);

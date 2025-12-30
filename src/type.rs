@@ -37,3 +37,12 @@ impl TypeExt for stmt::Type {
         }
     }
 }
+
+impl TypeExt for (&stmt::Value, Option<&stmt::Type>) {
+    fn to_postgres_type(&self) -> Type {
+        match self.1 {
+            Some(hint) => hint.to_postgres_type(),
+            None => self.0.infer_ty().to_postgres_type(),
+        }
+    }
+}

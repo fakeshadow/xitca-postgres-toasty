@@ -12,13 +12,17 @@ tls = ["xitca-postgres/tls"]
 
 nightly = ["xitca-postgres/nightly"]
 
+[[test]]
+name = "toasty_integration"
+path = "tests/toasty_integration.rs"
+required-features = ["rust_decimal"]
+
 [dependencies]
 xitca-postgres = { version = "0.3" }
 
 anyhow = "1"
 async-stream = "0.3.6"
 futures-core = { version = "0.3.31", default-features = false }
-pin-project-lite = "0.2.16"
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 toasty-core = "0.1.0"
 toasty-sql = "0.1"

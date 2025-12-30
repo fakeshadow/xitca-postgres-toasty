@@ -38,7 +38,7 @@ impl Connection {
     ) -> Result<(), xitca_postgres::Error> {
         let serializer = sql::Serializer::postgresql(schema);
 
-        let mut params = Vec::new();
+        let mut params = Vec::<toasty_sql::TypedValue>::new();
         let sql = serializer.serialize(
             &sql::Statement::create_table(table, self.capability()),
             &mut params,
@@ -81,7 +81,7 @@ impl Connection {
         if_exists: bool,
     ) -> Result<(), xitca_postgres::Error> {
         let serializer = sql::Serializer::postgresql(schema);
-        let mut params = Vec::new();
+        let mut params = Vec::<toasty_sql::TypedValue>::new();
 
         let sql = if if_exists {
             serializer.serialize(&sql::Statement::drop_table_if_exists(table), &mut params)
@@ -155,8 +155,8 @@ struct Params {
 }
 
 impl toasty_sql::Params for Params {
-    fn push(&mut self, param: &stmt::Value) -> Placeholder {
-        self.ty.push(param.infer_ty().to_postgres_type());
+    fn push(&mut self, param: &stmt::Value, hint: Option<&stmt::Type>) -> Placeholder {
+        self.ty.push((param, hint).to_postgres_type());
         self.val.push(Value::from(param.clone()));
         Placeholder(self.val.len())
     }
