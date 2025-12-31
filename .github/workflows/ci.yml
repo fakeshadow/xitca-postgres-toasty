@@ -71,4 +71,4 @@ jobs:
         - name: cargo test
           run: cargo test --all-features
         - name: cargo run --example hello
-          run: cargo run --example hell
+          run: cargo run --example hello
