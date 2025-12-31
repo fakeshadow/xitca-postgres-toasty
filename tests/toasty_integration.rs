@@ -7,7 +7,12 @@ struct DriverSetup;
 
 impl DriverSetup {
     fn new() -> PostgreSQL {
-        PostgreSQL::new("postgres://postgres:postgres@localhost:5432").unwrap()
+        PostgreSQL::new(
+            std::env::var("POSTGRES_URL")
+                .as_deref()
+                .unwrap_or("postgres://postgres:postgres@localhost:5432"),
+        )
+        .unwrap()
     }
 }
 

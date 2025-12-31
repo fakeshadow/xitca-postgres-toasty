@@ -1,0 +1,70 @@
+name: CI
+
+on:
+    push:
+        branches:
+        - main
+    pull_request:
+
+env:
+    CARGO_TERM_COLOR: always
+    RUSTFLAGS: -D warnings
+    RUST_BACKTRACE: 1
+    POSTGRES_URL: "postgres://postgres:postgres@localhost:5432"
+
+jobs:
+    check:
+        name: cargo check
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+          with:
+            components: rustfmt
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo check
+          run: cargo check --workspace --all-features
+        - name: cargo fmt
+          run: cargo fmt --all --check
+
+    clippy:
+        name: cargo clippy
+        runs-on: ubuntu-latest
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+          with:
+            components: clippy
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo clippy
+          run: cargo clippy --workspace --all-features
+
+    test-postgresql:
+        needs: check
+        name: Run tests for PostgreSQL
+        runs-on: ubuntu-latest
+        services:
+          postgresql:
+            image: postgres:18
+            env:
+              POSTGRES_USER: postgres
+              POSTGRES_PASSWORD: postgres
+            ports:
+              - 5432:5432
+            options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        env:
+            POSTGRES_URL: $POSTGRES_URL
+        steps:
+        - uses: actions/checkout@v4
+        - uses: dtolnay/rust-toolchain@stable
+        - uses: Swatinem/rust-cache@v2
+          with:
+            save-if: ${{ github.ref == 'refs/heads/main' }}
+        - name: cargo test
+          run: cargo test --all-features
+        - name: cargo run --example hello
+          run: cargo run --example hell

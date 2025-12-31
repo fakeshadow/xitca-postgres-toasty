@@ -17,6 +17,10 @@ name = "toasty_integration"
 path = "tests/toasty_integration.rs"
 required-features = ["rust_decimal"]
 
+[[example]]
+name = "hello"
+path = "examples/hello/src/main.rs"
+
 [dependencies]
 xitca-postgres = { version = "0.3" }
 
@@ -36,8 +40,8 @@ rust_decimal = { version = "1", features = ["db-postgres"], optional = true }
 [dev-dependencies]
 futures = { version = "0.3", default-features = false }
 toasty = "0.1"
-tokio = { version = "1", features = ["rt", "macros"] }
 toasty-driver-integration-suite = "0.1"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [patch.crates-io]
 toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
