@@ -22,9 +22,6 @@ name = "hello"
 path = "examples/hello/src/main.rs"
 
 [dependencies]
-xitca-postgres = { version = "0.3" }
-
-anyhow = "1"
 async-stream = "0.3.6"
 futures-core = { version = "0.3.31", default-features = false }
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
@@ -32,6 +29,7 @@ toasty-core = { version = "0.1.0", features = ["assert-struct"] }
 toasty-sql = "0.1"
 tokio = { version = "1", default-features = false }
 uuid = { version = "1", default-features = false }
+xitca-postgres = { version = "0.3" }
 
 bigdecimal = { version = "0.4.9", optional = true }
 jiff = { version = "0.2.16", optional = true }

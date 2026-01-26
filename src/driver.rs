@@ -22,7 +22,7 @@ pub use xitca_postgres::{Config, pool::Pool};
 /// # use toasty_core::{driver::Operation, schema::db::Schema};
 /// use toasty::driver::{Connection, Driver};
 ///
-/// # async fn multiplexing(schema: &Arc<Schema>, op1: Operation, op2: Operation) -> anyhow::Result<()> {
+/// # async fn multiplexing(schema: &Arc<Schema>, op1: Operation, op2: Operation) -> toasty_core::Result<()> {
 /// // construct a driver and obtain a connection manually.
 /// let driver = xitca_postgres_toasty::PostgreSQL::new("postgres://postgres:postgres@localhost:5432")?;
 /// let mut conn = driver.connect().await?;
@@ -74,9 +74,9 @@ impl PostgreSQL {
     pub fn builder<C>(cfg: C) -> PostgreSQLBuilder
     where
         Config: TryFrom<C>,
-        Error: From<<Config as TryFrom<C>>::Error>,
+        <Config as TryFrom<C>>::Error: core::error::Error + Send + Sync + 'static,
     {
-        PostgreSQLBuilder::new(cfg.try_into().map_err(Into::into))
+        PostgreSQLBuilder::new(cfg.try_into().map_err(Error::driver))
     }
 
     #[doc(hidden)]

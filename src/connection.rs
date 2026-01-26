@@ -3,7 +3,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use toasty_core::{
-    Result, async_trait,
+    Error, async_trait,
     driver::{Capability, Connection as ConnectionTrait, Operation, Response},
     schema::db::{Schema, Table},
     stmt,
@@ -107,7 +107,7 @@ impl ConnectionTrait for Connection {
         &Capability::POSTGRESQL
     }
 
-    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response> {
+    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
         let (sql, ret_tys) = match op {
             Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
             Operation::QuerySql(query) => {
@@ -129,20 +129,24 @@ impl ConnectionTrait for Connection {
         let stmt = Statement::named(&stmt, &ty).bind(val.iter());
 
         if width.is_none() {
-            let res = stmt.execute(&*self.pool).await?;
+            let res = stmt.execute(&*self.pool).await.map_err(Error::driver)?;
             Ok(Response::count(res))
         } else {
-            let stream = stmt.query(&*self.pool).await?;
+            let stream = stmt.query(&*self.pool).await.map_err(Error::driver)?;
             Ok(Response::value_stream(crate::async_iter::stream(
                 stream, ret_tys,
             )))
         }
     }
 
-    async fn reset_db(&mut self, schema: &Schema) -> Result<()> {
+    async fn reset_db(&mut self, schema: &Schema) -> Result<(), Error> {
         for table in &schema.tables {
-            self.drop_table(schema, table, true).await?;
-            self.create_table(schema, table).await?;
+            self.drop_table(schema, table, true)
+                .await
+                .map_err(Error::driver)?;
+            self.create_table(schema, table)
+                .await
+                .map_err(Error::driver)?;
         }
         Ok(())
     }

@@ -3,7 +3,7 @@ use xitca_postgres::{RowStreamOwned, iter::AsyncLendingIterator};
 
 pub(crate) fn stream(mut stream: RowStreamOwned, types: Vec<Type>) -> ValueStream {
     ValueStream::from_stream(async_stream::try_stream! {
-        while let Some(row) = stream.try_next().await? {
+        while let Some(row) = stream.try_next().await.map_err(toasty_core::Error::driver)? {
              let fields = row
                 .columns()
                 .iter()
