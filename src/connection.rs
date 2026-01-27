@@ -14,6 +14,7 @@ use xitca_postgres::{Execute, Statement, pool::Pool, types::Type};
 use crate::{r#type::TypeExt, value::Value};
 
 pub struct Connection {
+    params: Params,
     pool: Arc<Pool>,
 }
 
@@ -25,7 +26,10 @@ impl fmt::Debug for Connection {
 
 impl Connection {
     pub(crate) fn from_pool(pool: Arc<Pool>) -> Self {
-        Self { pool }
+        Self {
+            params: Params::default(),
+            pool,
+        }
     }
 }
 
@@ -122,11 +126,9 @@ impl ConnectionTrait for Connection {
 
         let width = sql.returning_len();
 
-        let mut params = Params::default();
-        let stmt = sql::Serializer::postgresql(schema).serialize(&sql, &mut params);
-        let Params { ty, val } = params;
-
-        let stmt = Statement::named(&stmt, &ty).bind(val.iter());
+        self.params.clear();
+        let stmt = sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
+        let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
 
         if width.is_none() {
             let res = stmt.execute(&*self.pool).await.map_err(Error::driver)?;
@@ -156,6 +158,13 @@ impl ConnectionTrait for Connection {
 struct Params {
     ty: Vec<Type>,
     val: Vec<Value>,
+}
+
+impl Params {
+    fn clear(&mut self) {
+        self.ty.clear();
+        self.val.clear();
+    }
 }
 
 impl toasty_sql::Params for Params {
