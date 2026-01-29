@@ -76,7 +76,7 @@ impl PostgreSQL {
         Config: TryFrom<C>,
         <Config as TryFrom<C>>::Error: core::error::Error + Send + Sync + 'static,
     {
-        PostgreSQLBuilder::new(cfg.try_into().map_err(Error::driver))
+        PostgreSQLBuilder::new(cfg.try_into().map_err(Error::driver_operation_failed))
     }
 
     #[doc(hidden)]

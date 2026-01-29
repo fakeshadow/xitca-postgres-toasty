@@ -131,10 +131,16 @@ impl ConnectionTrait for Connection {
         let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
 
         if width.is_none() {
-            let res = stmt.execute(&*self.pool).await.map_err(Error::driver)?;
+            let res = stmt
+                .execute(&*self.pool)
+                .await
+                .map_err(Error::driver_operation_failed)?;
             Ok(Response::count(res))
         } else {
-            let stream = stmt.query(&*self.pool).await.map_err(Error::driver)?;
+            let stream = stmt
+                .query(&*self.pool)
+                .await
+                .map_err(Error::driver_operation_failed)?;
             Ok(Response::value_stream(crate::async_iter::stream(
                 stream, ret_tys,
             )))
@@ -145,10 +151,10 @@ impl ConnectionTrait for Connection {
         for table in &schema.tables {
             self.drop_table(schema, table, true)
                 .await
-                .map_err(Error::driver)?;
+                .map_err(Error::driver_operation_failed)?;
             self.create_table(schema, table)
                 .await
-                .map_err(Error::driver)?;
+                .map_err(Error::driver_operation_failed)?;
         }
         Ok(())
     }
