@@ -44,7 +44,7 @@ impl Connection {
 
         let mut params = Vec::<toasty_sql::TypedValue>::new();
         let sql = serializer.serialize(
-            &sql::Statement::create_table(table, self.capability()),
+            &sql::Statement::create_table(table, &Capability::POSTGRESQL),
             &mut params,
         );
 
@@ -107,10 +107,6 @@ impl Connection {
 
 #[async_trait]
 impl ConnectionTrait for Connection {
-    fn capability(&self) -> &'static Capability {
-        &Capability::POSTGRESQL
-    }
-
     async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
         let (sql, ret_tys) = match op {
             Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),

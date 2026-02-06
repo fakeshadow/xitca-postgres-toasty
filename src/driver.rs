@@ -2,7 +2,10 @@ use core::fmt;
 
 use std::sync::Arc;
 
-use toasty_core::{Error, Result, async_trait, driver::Driver};
+use toasty_core::{
+    Error, Result, async_trait,
+    driver::{Capability, Driver},
+};
 
 use crate::connection::Connection;
 
@@ -137,6 +140,10 @@ impl PostgreSQLBuilder {
 
 #[async_trait]
 impl Driver for PostgreSQL {
+    fn capability(&self) -> &'static Capability {
+        &Capability::POSTGRESQL
+    }
+
     async fn connect(&self) -> Result<Box<dyn toasty_core::driver::Connection>> {
         Ok(Box::new(Connection::from_pool(self.pool.clone())))
     }
