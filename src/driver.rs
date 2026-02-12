@@ -5,6 +5,7 @@ use std::sync::Arc;
 use toasty_core::{
     Error, Result, async_trait,
     driver::{Capability, Driver},
+    schema::db::{Migration, SchemaDiff},
 };
 
 use crate::connection::Connection;
@@ -146,5 +147,27 @@ impl Driver for PostgreSQL {
 
     async fn connect(&self) -> Result<Box<dyn toasty_core::driver::Connection>> {
         Ok(Box::new(Connection::from_pool(self.pool.clone())))
+    }
+
+    fn generate_migration(&self, schema_diff: &SchemaDiff<'_>) -> Migration {
+        use toasty_sql::{MigrationStatement, Serializer, TypedValue};
+
+        let statements = MigrationStatement::from_diff(schema_diff, self.capability());
+
+        let sql_strings = statements
+            .iter()
+            .map(|stmt| {
+                let mut params = Vec::<TypedValue>::new();
+                let sql =
+                    Serializer::postgresql(stmt.schema()).serialize(stmt.statement(), &mut params);
+                assert!(
+                    params.is_empty(),
+                    "migration statements should not have parameters"
+                );
+                sql
+            })
+            .collect::<Vec<_>>();
+
+        Migration::new_sql(sql_strings.join("\n"))
     }
 }

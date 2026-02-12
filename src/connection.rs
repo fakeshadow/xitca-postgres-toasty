@@ -5,11 +5,17 @@ use std::sync::Arc;
 use toasty_core::{
     Error, async_trait,
     driver::{Capability, Connection as ConnectionTrait, Operation, Response},
-    schema::db::{Schema, Table},
+    schema::db::{AppliedMigration, Schema, Table},
     stmt,
 };
 use toasty_sql::{self as sql, serializer::Placeholder};
-use xitca_postgres::{Execute, Statement, pool::Pool, types::Type};
+use xitca_postgres::{
+    Execute,
+    iter::AsyncLendingIterator,
+    pool::Pool,
+    statement::{Statement, StatementNamed},
+    types::Type,
+};
 
 use crate::{r#type::TypeExt, value::Value};
 
@@ -154,7 +160,113 @@ impl ConnectionTrait for Connection {
         }
         Ok(())
     }
+
+    async fn applied_migrations(
+        &mut self,
+    ) -> Result<Vec<toasty_core::schema::db::AppliedMigration>, Error> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        // Ensure the migrations table exists
+        CREATE_MIGRATION_TABLE
+            .execute(&conn)
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        // Query all applied migrations
+        let mut rows = SELECT_MIGRATION
+            .bind_none()
+            .query(&conn)
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        let mut migrations = Vec::new();
+
+        while let Some(row) = rows
+            .try_next()
+            .await
+            .map_err(Error::driver_operation_failed)?
+        {
+            let id = row.get::<i64>(0);
+            migrations.push(AppliedMigration::new(id as u64))
+        }
+
+        Ok(migrations)
+    }
+
+    async fn apply_migration(
+        &mut self,
+        id: u64,
+        name: String,
+        migration: &toasty_core::schema::db::Migration,
+    ) -> Result<(), Error> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        // Ensure the migrations table exists
+        CREATE_MIGRATION_TABLE
+            .execute(&conn)
+            .await
+            .map_err(toasty_core::Error::driver_operation_failed)?;
+
+        // Start transaction
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(toasty_core::Error::driver_operation_failed)?;
+
+        // Execute each migration statement
+        for stmt in migration.statements() {
+            if let Err(e) = Statement::named(stmt, &[])
+                .bind_none()
+                .execute(&tx)
+                .await
+                .map_err(toasty_core::Error::driver_operation_failed)
+            {
+                tx.rollback()
+                    .await
+                    .map_err(toasty_core::Error::driver_operation_failed)?;
+                return Err(e);
+            }
+        }
+
+        // Record the migration
+        if let Err(e) = RECORD_MIGRATION
+            .bind_dyn(&[&(id as i64), &name])
+            .execute(&tx)
+            .await
+            .map_err(toasty_core::Error::driver_operation_failed)
+        {
+            tx.rollback()
+                .await
+                .map_err(toasty_core::Error::driver_operation_failed)?;
+            return Err(e);
+        }
+
+        // Commit transaction
+        tx.commit()
+            .await
+            .map_err(toasty_core::Error::driver_operation_failed)
+    }
 }
+
+const CREATE_MIGRATION_TABLE: &str = "CREATE TABLE IF NOT EXISTS __toasty_migrations (id BIGINT PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL)";
+
+const SELECT_MIGRATION: StatementNamed<'_> = Statement::named(
+    "SELECT id FROM __toasty_migrations ORDER BY applied_at",
+    &[],
+);
+
+const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
+    "INSERT INTO __toasty_migrations (id, name, applied_at) VALUES ($1, $2, NOW())",
+    &[],
+);
 
 #[derive(Default, Debug)]
 struct Params {
