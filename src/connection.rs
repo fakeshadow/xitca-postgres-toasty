@@ -8,7 +8,7 @@ use toasty_core::{
     schema::db::{AppliedMigration, Migration, Schema, Table},
     stmt,
 };
-use toasty_sql::{self as sql, serializer::Placeholder};
+use toasty_sql::{TypedValue, serializer::Placeholder};
 use xitca_postgres::{
     Execute,
     iter::AsyncLendingIterator,
@@ -46,11 +46,11 @@ impl Connection {
         schema: &Schema,
         table: &Table,
     ) -> Result<(), xitca_postgres::Error> {
-        let serializer = sql::Serializer::postgresql(schema);
+        let serializer = toasty_sql::Serializer::postgresql(schema);
 
-        let mut params = Vec::<toasty_sql::TypedValue>::new();
+        let mut params = Vec::<TypedValue>::new();
         let sql = serializer.serialize(
-            &sql::Statement::create_table(table, &Capability::POSTGRESQL),
+            &toasty_sql::Statement::create_table(table, &Capability::POSTGRESQL),
             &mut params,
         );
 
@@ -65,12 +65,8 @@ impl Connection {
 
         // NOTE: `params` is guaranteed to be empty based on the assertion above. If
         // that changes, `params.clear()` should be called here.
-        for index in &table.indices {
-            if index.primary_key {
-                continue;
-            }
-
-            let sql = serializer.serialize(&sql::Statement::create_index(index), &mut params);
+        for idx in table.indices.iter().filter(|idx| !idx.primary_key) {
+            let sql = serializer.serialize(&toasty_sql::Statement::create_index(idx), &mut params);
 
             assert!(
                 params.is_empty(),
@@ -90,13 +86,16 @@ impl Connection {
         table: &Table,
         if_exists: bool,
     ) -> Result<(), xitca_postgres::Error> {
-        let serializer = sql::Serializer::postgresql(schema);
-        let mut params = Vec::<toasty_sql::TypedValue>::new();
+        let serializer = toasty_sql::Serializer::postgresql(schema);
+        let mut params = Vec::<TypedValue>::new();
 
         let sql = if if_exists {
-            serializer.serialize(&sql::Statement::drop_table_if_exists(table), &mut params)
+            serializer.serialize(
+                &toasty_sql::Statement::drop_table_if_exists(table),
+                &mut params,
+            )
         } else {
-            serializer.serialize(&sql::Statement::drop_table(table), &mut params)
+            serializer.serialize(&toasty_sql::Statement::drop_table(table), &mut params)
         };
 
         assert!(
@@ -105,9 +104,7 @@ impl Connection {
         );
 
         let conn = self.pool.get().await?;
-
-        sql.execute(&conn).await?;
-        Ok(())
+        sql.execute(&conn).await.map(|_| ())
     }
 
     async fn _applied_migrations(
@@ -142,10 +139,8 @@ impl Connection {
         // Ensure the migrations table exists
         CREATE_MIGRATION_TABLE.execute(&conn).await?;
 
-        // Start transaction
         let tx = conn.transaction().await?;
 
-        // Execute each migration statement
         for stmt in migration.statements() {
             if let Err(e) = stmt.execute(&tx).await {
                 tx.rollback().await?;
@@ -153,7 +148,6 @@ impl Connection {
             }
         }
 
-        // Record the migration
         if let Err(e) = RECORD_MIGRATION
             .bind_dyn(&[&(id as i64), &name])
             .execute(&tx)
@@ -163,7 +157,6 @@ impl Connection {
             return Err(e);
         }
 
-        // Commit transaction
         tx.commit().await
     }
 }
@@ -177,14 +170,14 @@ const SELECT_MIGRATION: StatementNamed<'_> = Statement::named(
 
 const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
     "INSERT INTO __toasty_migrations (id, name, applied_at) VALUES ($1, $2, NOW())",
-    &[],
+    &[Type::INT8, Type::TEXT],
 );
 
 #[async_trait]
 impl ConnectionTrait for Connection {
     async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
         let (sql, ret_tys) = match op {
-            Operation::Insert(op) => (sql::Statement::from(op.stmt), Vec::new()),
+            Operation::Insert(op) => (toasty_sql::Statement::from(op.stmt), Vec::new()),
             Operation::QuerySql(query) => {
                 assert!(
                     query.last_insert_id_hack.is_none(),
@@ -198,7 +191,7 @@ impl ConnectionTrait for Connection {
         let width = sql.returning_len();
 
         self.params.clear();
-        let stmt = sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
+        let stmt = toasty_sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
         let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
 
         if width.is_none() {
