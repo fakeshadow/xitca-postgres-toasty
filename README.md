@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // interact with database
 
-    orm.reset_db().await?;
+    orm.push_schema().await?;
 
     User::create()
         .id(123)

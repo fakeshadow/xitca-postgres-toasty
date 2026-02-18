@@ -7,10 +7,11 @@ use toasty_core::{
     driver::{Capability, Driver},
     schema::db::{Migration, SchemaDiff},
 };
+use xitca_postgres::{Execute, Statement, pool::Pool, types::Type};
 
 use crate::connection::Connection;
 
-pub use xitca_postgres::{Config, pool::Pool};
+pub use xitca_postgres::Config;
 
 /// async postgresql driver for toasty ORM
 ///
@@ -49,6 +50,7 @@ pub use xitca_postgres::{Config, pool::Pool};
 /// ```
 pub struct PostgreSQL {
     pool: Arc<Pool>,
+    cfg: Config,
 }
 
 impl fmt::Debug for PostgreSQL {
@@ -130,17 +132,22 @@ impl PostgreSQLBuilder {
         let cfg = self.cfg?;
         Ok(PostgreSQL {
             pool: Arc::new(
-                Pool::builder(cfg)
+                Pool::builder(cfg.clone())
                     .capacity(self.concurrency)
                     .build()
                     .expect("Config is already parsed"),
             ),
+            cfg,
         })
     }
 }
 
 #[async_trait]
 impl Driver for PostgreSQL {
+    fn url(&self) -> std::borrow::Cow<'_, str> {
+        unimplemented!()
+    }
+
     fn capability(&self) -> &'static Capability {
         &Capability::POSTGRESQL
     }
@@ -169,5 +176,71 @@ impl Driver for PostgreSQL {
             .collect::<Vec<_>>();
 
         Migration::new_sql(sql_strings.join("\n"))
+    }
+
+    async fn reset_db(&self) -> Result<()> {
+        // We cannot drop a database we are currently connected to, so we need a temp database.
+        const TEMP_NAME: &str = "__toasty_reset_temp";
+
+        // Step 1: Create a temp DB
+        {
+            let conn = self
+                .pool
+                .get()
+                .await
+                .map_err(Error::driver_operation_failed)?;
+
+            format!("DROP DATABASE IF EXISTS \"{TEMP_NAME}\"")
+                .execute(&conn)
+                .await
+                .map_err(Error::driver_operation_failed)?;
+            format!("CREATE DATABASE \"{TEMP_NAME}\"")
+                .execute(&conn)
+                .await
+                .map_err(Error::driver_operation_failed)?;
+        }
+
+        {
+            let dbname = self.cfg.get_dbname().unwrap_or("postgres");
+
+            let mut cfg = self.cfg.clone();
+            cfg.dbname(TEMP_NAME);
+
+            let (conn, drv) = xitca_postgres::Postgres::new(cfg)
+                .connect()
+                .await
+                .map_err(Error::driver_operation_failed)?;
+            tokio::task::spawn(drv.into_future());
+
+            // Step 2: Connect to the temp DB, drop and recreate the target
+            Statement::named("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", &[Type::TEXT])
+                 .bind([dbname])
+                 .execute(&conn)
+                 .await
+                 .map_err(Error::driver_operation_failed)?;
+
+            format!("DROP DATABASE IF EXISTS \"{dbname}\"")
+                .execute(&conn)
+                .await
+                .map_err(Error::driver_operation_failed)?;
+            format!("CREATE DATABASE \"{dbname}\"")
+                .execute(&conn)
+                .await
+                .map_err(Error::driver_operation_failed)?;
+        }
+
+        // Step 3: Connect back to the target and clean up the temp DB
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        format!("DROP DATABASE IF EXISTS \"{TEMP_NAME}\"")
+            .execute(&conn)
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        Ok(())
     }
 }

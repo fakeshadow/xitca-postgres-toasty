@@ -79,34 +79,6 @@ impl Connection {
         Ok(())
     }
 
-    // Drops a table.
-    async fn drop_table(
-        &mut self,
-        schema: &Schema,
-        table: &Table,
-        if_exists: bool,
-    ) -> Result<(), xitca_postgres::Error> {
-        let serializer = toasty_sql::Serializer::postgresql(schema);
-        let mut params = Vec::<TypedValue>::new();
-
-        let sql = if if_exists {
-            serializer.serialize(
-                &toasty_sql::Statement::drop_table_if_exists(table),
-                &mut params,
-            )
-        } else {
-            serializer.serialize(&toasty_sql::Statement::drop_table(table), &mut params)
-        };
-
-        assert!(
-            params.is_empty(),
-            "dropping a table shouldn't involve any parameters"
-        );
-
-        let conn = self.pool.get().await?;
-        sql.execute(&conn).await.map(|_| ())
-    }
-
     async fn _applied_migrations(
         &mut self,
     ) -> Result<Vec<AppliedMigration>, xitca_postgres::Error> {
@@ -211,11 +183,8 @@ impl ConnectionTrait for Connection {
         }
     }
 
-    async fn reset_db(&mut self, schema: &Schema) -> Result<(), Error> {
+    async fn push_schema(&mut self, schema: &Schema) -> Result<(), Error> {
         for table in &schema.tables {
-            self.drop_table(schema, table, true)
-                .await
-                .map_err(Error::driver_operation_failed)?;
             self.create_table(schema, table)
                 .await
                 .map_err(Error::driver_operation_failed)?;
