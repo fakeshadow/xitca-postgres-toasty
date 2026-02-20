@@ -168,13 +168,13 @@ impl ConnectionTrait for Connection {
 
         if width.is_none() {
             let res = stmt
-                .execute(&*self.pool)
+                .execute(&self.pool)
                 .await
                 .map_err(Error::driver_operation_failed)?;
             Ok(Response::count(res))
         } else {
             let stream = stmt
-                .query(&*self.pool)
+                .query(&self.pool)
                 .await
                 .map_err(Error::driver_operation_failed)?;
             Ok(Response::value_stream(crate::async_iter::stream(
