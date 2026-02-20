@@ -46,4 +46,3 @@ toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-sql = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-driver-integration-suite = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
-xitca-postgres = { git = "https://github.com/HFQR/xitca-web" }

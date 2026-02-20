@@ -59,9 +59,7 @@ impl Connection {
             "creating a table shouldn't involve any parameters"
         );
 
-        let conn = self.pool.get().await?;
-
-        sql.execute(&conn).await?;
+        sql.execute(&self.pool).await?;
 
         // NOTE: `params` is guaranteed to be empty based on the assertion above. If
         // that changes, `params.clear()` should be called here.
@@ -73,7 +71,7 @@ impl Connection {
                 "creating an index shouldn't involve any parameters"
             );
 
-            sql.execute(&conn).await?;
+            sql.execute(&self.pool).await?;
         }
 
         Ok(())
@@ -82,13 +80,11 @@ impl Connection {
     async fn _applied_migrations(
         &mut self,
     ) -> Result<Vec<AppliedMigration>, xitca_postgres::Error> {
-        let conn = self.pool.get().await?;
-
         // Ensure the migrations table exists
-        CREATE_MIGRATION_TABLE.execute(&conn).await?;
+        CREATE_MIGRATION_TABLE.execute(&self.pool).await?;
 
         // Query all applied migrations
-        let mut rows = SELECT_MIGRATION.bind_none().query(&conn).await?;
+        let mut rows = SELECT_MIGRATION.bind_none().query(&self.pool).await?;
 
         let mut migrations = Vec::new();
 
@@ -106,12 +102,10 @@ impl Connection {
         name: String,
         migration: &Migration,
     ) -> Result<(), xitca_postgres::Error> {
-        let mut conn = self.pool.get().await?;
-
         // Ensure the migrations table exists
-        CREATE_MIGRATION_TABLE.execute(&conn).await?;
+        CREATE_MIGRATION_TABLE.execute(&self.pool).await?;
 
-        let tx = conn.transaction().await?;
+        let tx = self.pool.get().await?.transaction_owned().await?;
 
         for stmt in migration.statements() {
             if let Err(e) = stmt.execute(&tx).await {

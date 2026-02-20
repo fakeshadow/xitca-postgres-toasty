@@ -50,7 +50,6 @@ pub use xitca_postgres::Config;
 /// ```
 pub struct PostgreSQL {
     pool: Arc<Pool>,
-    cfg: Config,
 }
 
 impl fmt::Debug for PostgreSQL {
@@ -132,12 +131,11 @@ impl PostgreSQLBuilder {
         let cfg = self.cfg?;
         Ok(PostgreSQL {
             pool: Arc::new(
-                Pool::builder(cfg.clone())
+                Pool::builder(cfg)
                     .capacity(self.concurrency)
                     .build()
                     .expect("Config is already parsed"),
             ),
-            cfg,
         })
     }
 }
@@ -183,27 +181,20 @@ impl Driver for PostgreSQL {
         const TEMP_NAME: &str = "__toasty_reset_temp";
 
         // Step 1: Create a temp DB
+        format!("DROP DATABASE IF EXISTS \"{TEMP_NAME}\"")
+            .execute(&self.pool)
+            .await
+            .map_err(Error::driver_operation_failed)?;
+        format!("CREATE DATABASE \"{TEMP_NAME}\"")
+            .execute(&self.pool)
+            .await
+            .map_err(Error::driver_operation_failed)?;
+
+        // Step 2: Connect to the temp DB, drop and recreate the target
         {
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(Error::driver_operation_failed)?;
+            let dbname = self.pool.config().get_dbname().unwrap_or("postgres");
 
-            format!("DROP DATABASE IF EXISTS \"{TEMP_NAME}\"")
-                .execute(&conn)
-                .await
-                .map_err(Error::driver_operation_failed)?;
-            format!("CREATE DATABASE \"{TEMP_NAME}\"")
-                .execute(&conn)
-                .await
-                .map_err(Error::driver_operation_failed)?;
-        }
-
-        {
-            let dbname = self.cfg.get_dbname().unwrap_or("postgres");
-
-            let mut cfg = self.cfg.clone();
+            let mut cfg = self.pool.config().clone();
             cfg.dbname(TEMP_NAME);
 
             let (conn, drv) = xitca_postgres::Postgres::new(cfg)
@@ -212,7 +203,6 @@ impl Driver for PostgreSQL {
                 .map_err(Error::driver_operation_failed)?;
             tokio::task::spawn(drv.into_future());
 
-            // Step 2: Connect to the temp DB, drop and recreate the target
             Statement::named("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", &[Type::TEXT])
                  .bind([dbname])
                  .execute(&conn)
@@ -230,14 +220,8 @@ impl Driver for PostgreSQL {
         }
 
         // Step 3: Connect back to the target and clean up the temp DB
-        let conn = self
-            .pool
-            .get()
-            .await
-            .map_err(Error::driver_operation_failed)?;
-
         format!("DROP DATABASE IF EXISTS \"{TEMP_NAME}\"")
-            .execute(&conn)
+            .execute(&self.pool)
             .await
             .map_err(Error::driver_operation_failed)?;
 
