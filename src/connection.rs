@@ -143,7 +143,6 @@ const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
 impl ConnectionTrait for Connection {
     async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
         let (sql, ret_tys) = match op {
-            Operation::Insert(op) => (toasty_sql::Statement::from(op.stmt), Vec::new()),
             Operation::QuerySql(query) => {
                 assert!(
                     query.last_insert_id_hack.is_none(),
@@ -151,6 +150,16 @@ impl ConnectionTrait for Connection {
                 );
                 (query.stmt.into(), query.ret.unwrap_or_default())
             }
+            Operation::Insert(op) => (toasty_sql::Statement::from(op.stmt), Vec::new()),
+            Operation::Transaction(tx) => {
+                toasty_sql::Serializer::postgresql(schema)
+                    .serialize_transaction(&tx)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(Error::driver_operation_failed)?;
+                return Ok(Response::count(0));
+            }
+
             op => todo!("op={:#?}", op),
         };
 
