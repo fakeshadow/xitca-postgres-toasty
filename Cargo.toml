@@ -29,7 +29,7 @@ toasty-core = { version = "0.1.0", features = ["assert-struct"] }
 toasty-sql = "0.1"
 tokio = { version = "1", default-features = false }
 uuid = { version = "1", default-features = false }
-xitca-postgres = { version = "0.4" }
+xitca-postgres = { version = "0.5" }
 
 bigdecimal = { version = "0.4.9", optional = true }
 jiff = { version = "0.2.16", optional = true }
@@ -46,3 +46,5 @@ toasty = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-core = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-sql = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
 toasty-driver-integration-suite = { git = "http://github.com/fakeshadow/toasty", branch = "engine" }
+
+xitca-postgres = { git = "https://github.com/HFQR/xitca-web", rev = "c540987" }

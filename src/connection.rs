@@ -1,10 +1,10 @@
 use core::fmt;
 
-use std::sync::Arc;
-
 use toasty_core::{
     Error, async_trait,
-    driver::{Capability, Connection as ConnectionTrait, Operation, Response},
+    driver::{
+        Capability, Connection as ConnectionTrait, Operation, Response, operation::Transaction,
+    },
     schema::db::{AppliedMigration, Migration, Schema, Table},
     stmt,
 };
@@ -12,7 +12,7 @@ use toasty_sql::{TypedValue, serializer::Placeholder};
 use xitca_postgres::{
     Execute,
     iter::AsyncLendingIterator,
-    pool::Pool,
+    pool::{PermitOwned, PoolConnection, PoolOwned},
     statement::{Statement, StatementNamed},
     types::Type,
 };
@@ -21,7 +21,15 @@ use crate::{r#type::TypeExt, value::Value};
 
 pub struct Connection {
     params: Params,
-    pool: Arc<Pool>,
+    pool: PoolOwned,
+    tx_state: TransactionState,
+}
+
+// state tracking transaction state of current connection.
+// when a transaction starts we keep the connection and use it for execution instead of connection pool.
+enum TransactionState {
+    Uninit,
+    Started(PoolConnection<PermitOwned>),
 }
 
 impl fmt::Debug for Connection {
@@ -31,10 +39,11 @@ impl fmt::Debug for Connection {
 }
 
 impl Connection {
-    pub(crate) fn from_pool(pool: Arc<Pool>) -> Self {
+    pub(crate) fn from_pool(pool: PoolOwned) -> Self {
         Self {
             params: Params::default(),
             pool,
+            tx_state: TransactionState::Uninit,
         }
     }
 }
@@ -75,6 +84,71 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    async fn exec_tx(
+        &mut self,
+        schema: &Schema,
+        tx: Transaction,
+    ) -> Result<Response, xitca_postgres::Error> {
+        if matches!(tx, Transaction::Start) {
+            let conn = self.pool.get().await?;
+            self.tx_state = TransactionState::Started(conn);
+        }
+
+        let TransactionState::Started(ref conn) = self.tx_state else {
+            unreachable!()
+        };
+
+        toasty_sql::Serializer::postgresql(schema)
+            .serialize_transaction(&tx)
+            .execute(conn)
+            .await?;
+
+        if matches!(tx, Transaction::Commit | Transaction::Rollback) {
+            self.tx_state = TransactionState::Uninit;
+        }
+
+        Ok(Response::count(0))
+    }
+
+    async fn _exec(
+        &mut self,
+        schema: &Schema,
+        op: Operation,
+    ) -> Result<Response, xitca_postgres::Error> {
+        let (sql, ret_tys) = match op {
+            Operation::QuerySql(query) => {
+                assert!(
+                    query.last_insert_id_hack.is_none(),
+                    "last_insert_id_hack is MySQL-specific and should not be set for PostgreSQL"
+                );
+                (query.stmt.into(), query.ret.unwrap_or_default())
+            }
+            Operation::Insert(op) => (toasty_sql::Statement::from(op.stmt), Vec::new()),
+            Operation::Transaction(tx) => return self.exec_tx(schema, tx).await,
+            op => todo!("op={:#?}", op),
+        };
+
+        let width = sql.returning_len();
+
+        self.params.clear();
+        let stmt = toasty_sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
+        let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
+
+        if width.is_none() {
+            match self.tx_state {
+                TransactionState::Started(ref mut conn) => stmt.execute(conn).await?.await,
+                TransactionState::Uninit => stmt.execute(&self.pool).await,
+            }
+            .map(Response::count)
+        } else {
+            match self.tx_state {
+                TransactionState::Started(ref mut conn) => stmt.query(conn).await,
+                TransactionState::Uninit => stmt.query(&self.pool).await,
+            }
+            .map(|stream| Response::value_stream(crate::async_iter::stream(stream, ret_tys)))
+        }
     }
 
     async fn _applied_migrations(
@@ -141,49 +215,10 @@ const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
 
 #[async_trait]
 impl ConnectionTrait for Connection {
-    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
-        let (sql, ret_tys) = match op {
-            Operation::QuerySql(query) => {
-                assert!(
-                    query.last_insert_id_hack.is_none(),
-                    "last_insert_id_hack is MySQL-specific and should not be set for PostgreSQL"
-                );
-                (query.stmt.into(), query.ret.unwrap_or_default())
-            }
-            Operation::Insert(op) => (toasty_sql::Statement::from(op.stmt), Vec::new()),
-            Operation::Transaction(tx) => {
-                toasty_sql::Serializer::postgresql(schema)
-                    .serialize_transaction(&tx)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(Error::driver_operation_failed)?;
-                return Ok(Response::count(0));
-            }
-
-            op => todo!("op={:#?}", op),
-        };
-
-        let width = sql.returning_len();
-
-        self.params.clear();
-        let stmt = toasty_sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
-        let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
-
-        if width.is_none() {
-            let res = stmt
-                .execute(&self.pool)
-                .await
-                .map_err(Error::driver_operation_failed)?;
-            Ok(Response::count(res))
-        } else {
-            let stream = stmt
-                .query(&self.pool)
-                .await
-                .map_err(Error::driver_operation_failed)?;
-            Ok(Response::value_stream(crate::async_iter::stream(
-                stream, ret_tys,
-            )))
-        }
+    async fn exec(&mut self, schema: &std::sync::Arc<Schema>, op: Operation) -> Result<Response, Error> {
+        self._exec(schema, op)
+            .await
+            .map_err(Error::driver_operation_failed)
     }
 
     async fn push_schema(&mut self, schema: &Schema) -> Result<(), Error> {

@@ -1,13 +1,15 @@
 use core::fmt;
 
-use std::sync::Arc;
-
 use toasty_core::{
     Error, Result, async_trait,
     driver::{Capability, Driver},
     schema::db::{Migration, SchemaDiff},
 };
-use xitca_postgres::{Execute, Statement, pool::Pool, types::Type};
+use xitca_postgres::{
+    Execute, Statement,
+    pool::{Pool, PoolOwned},
+    types::Type,
+};
 
 use crate::connection::Connection;
 
@@ -49,7 +51,7 @@ pub use xitca_postgres::Config;
 /// # }
 /// ```
 pub struct PostgreSQL {
-    pool: Arc<Pool>,
+    pool: PoolOwned,
 }
 
 impl fmt::Debug for PostgreSQL {
@@ -87,7 +89,7 @@ impl PostgreSQL {
     #[doc(hidden)]
     /// Expose `xitca-postgres` crate internal for testing purpose. this API does not offer any stability and can
     /// be changed without proper versioning
-    pub fn pool(&self) -> &Pool {
+    pub fn pool(&self) -> &PoolOwned {
         &self.pool
     }
 }
@@ -130,12 +132,10 @@ impl PostgreSQLBuilder {
     pub fn build(self) -> Result<PostgreSQL> {
         let cfg = self.cfg?;
         Ok(PostgreSQL {
-            pool: Arc::new(
-                Pool::builder(cfg)
-                    .capacity(self.concurrency)
-                    .build()
-                    .expect("Config is already parsed"),
-            ),
+            pool: Pool::builder(cfg)
+                .capacity(self.concurrency)
+                .build_owned()
+                .expect("Config is already parsed"),
         })
     }
 }
