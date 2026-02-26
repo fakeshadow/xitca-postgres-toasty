@@ -12,7 +12,7 @@ use toasty_sql::{TypedValue, serializer::Placeholder};
 use xitca_postgres::{
     Execute,
     iter::AsyncLendingIterator,
-    pool::{PermitOwned, PoolConnection, PoolOwned},
+    pool::{PoolConnectionOwned, PoolOwned},
     statement::{Statement, StatementNamed},
     types::Type,
 };
@@ -29,7 +29,7 @@ pub struct Connection {
 // when a transaction starts we keep the connection and use it for execution instead of connection pool.
 enum TransactionState {
     Uninit,
-    Started(PoolConnection<PermitOwned>),
+    Started(PoolConnectionOwned),
 }
 
 impl fmt::Debug for Connection {
@@ -215,7 +215,11 @@ const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
 
 #[async_trait]
 impl ConnectionTrait for Connection {
-    async fn exec(&mut self, schema: &std::sync::Arc<Schema>, op: Operation) -> Result<Response, Error> {
+    async fn exec(
+        &mut self,
+        schema: &std::sync::Arc<Schema>,
+        op: Operation,
+    ) -> Result<Response, Error> {
         self._exec(schema, op)
             .await
             .map_err(Error::driver_operation_failed)
