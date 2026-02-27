@@ -91,7 +91,7 @@ impl Connection {
         schema: &Schema,
         tx: Transaction,
     ) -> Result<Response, xitca_postgres::Error> {
-        if matches!(tx, Transaction::Start) {
+        if matches!(tx, Transaction::Start { .. }) {
             let conn = self.pool.get().await?;
             self.tx_state = TransactionState::Started(conn);
         }
