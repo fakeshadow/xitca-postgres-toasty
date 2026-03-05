@@ -215,11 +215,7 @@ const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
 
 #[async_trait]
 impl ConnectionTrait for Connection {
-    async fn exec(
-        &mut self,
-        schema: &std::sync::Arc<Schema>,
-        op: Operation,
-    ) -> Result<Response, Error> {
+    async fn exec(&mut self, schema: &Schema, op: Operation) -> Result<Response, Error> {
         self._exec(schema, op)
             .await
             .map_err(Error::driver_operation_failed)

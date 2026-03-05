@@ -24,12 +24,11 @@ pub use xitca_postgres::Config;
 /// ```rust
 /// // This is a desugared example for showcasing features of driver.
 /// // In real world usage all the details are handled by toasty ORM automatically
-/// # use std::sync::Arc;
 /// #
 /// # use toasty_core::{driver::Operation, schema::db::Schema};
 /// use toasty::driver::{Connection, Driver};
 ///
-/// # async fn multiplexing(schema: &Arc<Schema>, op1: Operation, op2: Operation) -> toasty_core::Result<()> {
+/// # async fn multiplexing(schema: &Schema, op1: Operation, op2: Operation) -> toasty_core::Result<()> {
 /// // construct a driver and obtain a connection manually.
 /// let driver = xitca_postgres_toasty::PostgreSQL::new("postgres://postgres:postgres@localhost:5432")?;
 /// let mut conn = driver.connect().await?;
