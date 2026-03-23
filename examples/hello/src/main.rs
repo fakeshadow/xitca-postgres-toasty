@@ -32,20 +32,17 @@ struct Todo {
 
 #[tokio::main]
 async fn main() -> toasty::Result<()> {
-    let drv = xitca_postgres_toasty::PostgreSQL::new(
-        std::env::var("POSTGRES_URL")
-            .as_deref()
-            .unwrap_or("postgres://postgres:postgres@localhost:5432"),
-    )?;
-
     let mut db = toasty::Db::builder()
         .register::<User>()
         .register::<Todo>()
-        .build(drv)
+        .connect(
+            std::env::var("TOASTY_CONNECTION_URL")
+                .as_deref()
+                .unwrap_or("sqlite::memory:"),
+        )
         .await?;
 
     // For now, reset!s
-    db.reset_db().await?;
     db.push_schema().await?;
 
     println!("==> let u1 = User::create()");
@@ -100,17 +97,16 @@ async fn main() -> toasty::Result<()> {
 
     println!("CREATED = {todo:#?}");
 
-    let mut todos = u2.todos().all(&mut db).await?;
+    let todos = u2.todos().exec(&mut db).await?;
 
-    while let Some(todo) = todos.next().await {
-        let todo = todo?;
+    for todo in todos {
         println!("TODO; title={:?}", todo.title);
-        // println!("-> user {:?}", todo.user().get(&mut db).await?);
+        println!("-> user {:?}", todo.user().exec(&mut db).await?);
     }
 
     // Delete user
     let user = User::get_by_id(&mut db, &u2.id).await?;
-    user.delete(&mut db).await?;
+    user.delete().exec(&mut db).await?;
     assert!(User::get_by_id(&mut db, &u2.id).await.is_err());
 
     // Create a batch of users
@@ -136,15 +132,12 @@ async fn main() -> toasty::Result<()> {
         .await?;
 
     // Get the last todo so we can unlink it
-    let todos = user.todos().collect::<Vec<_>>(&mut db).await?;
+    let todos = user.todos().exec(&mut db).await?;
     let len = todos.len();
 
     user.todos().remove(&mut db, todos.last().unwrap()).await?;
 
-    assert_eq!(
-        len - 1,
-        user.todos().collect::<Vec<_>>(&mut db).await?.len()
-    );
+    assert_eq!(len - 1, user.todos().exec(&mut db).await?.len());
 
     println!(">>> DONE <<<");
 

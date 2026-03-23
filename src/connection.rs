@@ -1,11 +1,13 @@
 use core::fmt;
 
+use std::sync::Arc;
+
 use toasty_core::{
-    Error, async_trait,
+    Error, Schema, async_trait,
     driver::{
         Capability, Connection as ConnectionTrait, Operation, Response, operation::Transaction,
     },
-    schema::db::{AppliedMigration, Migration, Schema, Table},
+    schema::db::{AppliedMigration, Migration, Table},
     stmt,
 };
 use toasty_sql::{TypedValue, serializer::Placeholder};
@@ -55,7 +57,7 @@ impl Connection {
         schema: &Schema,
         table: &Table,
     ) -> Result<(), xitca_postgres::Error> {
-        let serializer = toasty_sql::Serializer::postgresql(schema);
+        let serializer = toasty_sql::Serializer::postgresql(&schema.db);
 
         let mut params = Vec::<TypedValue>::new();
         let sql = serializer.serialize(
@@ -100,7 +102,7 @@ impl Connection {
             unreachable!()
         };
 
-        toasty_sql::Serializer::postgresql(schema)
+        toasty_sql::Serializer::postgresql(&schema.db)
             .serialize_transaction(&tx)
             .execute(conn)
             .await?;
@@ -133,7 +135,7 @@ impl Connection {
         let width = sql.returning_len();
 
         self.params.clear();
-        let stmt = toasty_sql::Serializer::postgresql(schema).serialize(&sql, &mut self.params);
+        let stmt = toasty_sql::Serializer::postgresql(&schema.db).serialize(&sql, &mut self.params);
         let stmt = Statement::named(&stmt, &self.params.ty).bind(self.params.val.iter());
 
         if width.is_none() {
@@ -215,14 +217,14 @@ const RECORD_MIGRATION: StatementNamed<'_> = Statement::named(
 
 #[async_trait]
 impl ConnectionTrait for Connection {
-    async fn exec(&mut self, schema: &Schema, op: Operation) -> Result<Response, Error> {
+    async fn exec(&mut self, schema: &Arc<Schema>, op: Operation) -> Result<Response, Error> {
         self._exec(schema, op)
             .await
             .map_err(Error::driver_operation_failed)
     }
 
     async fn push_schema(&mut self, schema: &Schema) -> Result<(), Error> {
-        for table in &schema.tables {
+        for table in &schema.db.tables {
             self.create_table(schema, table)
                 .await
                 .map_err(Error::driver_operation_failed)?;
